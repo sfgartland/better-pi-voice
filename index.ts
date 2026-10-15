@@ -5,10 +5,21 @@
  * cheap and a broken voice setup cannot stop pi from starting.
  */
 
+import { existsSync } from "node:fs";
+import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { KeyId } from "@earendil-works/pi-tui";
+import { availableModels } from "./src/backends/parakeet.ts";
+import { ensureFirstRunSettings } from "./src/first-run.ts";
 import { backendLabel, createRuntime, type Runtime } from "./src/runtime.ts";
-import { readSettings, settingsPath, type VoiceSettings, writeSettings } from "./src/settings.ts";
+import {
+	applySetting,
+	readSettings,
+	SETTABLE_KEYS,
+	settingsPath,
+	type VoiceSettings,
+	writeSettings,
+} from "./src/settings.ts";
 
 const BACKENDS = ["deepgram", "parakeet"] as const;
 type BackendId = (typeof BACKENDS)[number];
@@ -40,7 +51,7 @@ async function removeUserKeyterm(raw: string): Promise<string> {
 function describe(settings: VoiceSettings, runtime: Runtime | undefined): string {
 	const lines = [
 		"better-pi-voice",
-		`  backend    ${settings.backend}${settings.backend === "deepgram" ? ` (${settings.deepgram.model})` : ""}`,
+		`  backend    ${backendLabel(settings)}`,
 		`  mode       ${settings.mode}`,
 		`  shortcut   ${settings.shortcut}`,
 		`  language   ${settings.language}`,
@@ -86,14 +97,15 @@ export default async function betterPiVoice(pi: ExtensionAPI): Promise<void> {
 	};
 
 	pi.registerCommand("voice", {
-		description: "Voice input status; /voice backend [deepgram|parakeet] to switch",
+		description: "Voice input status and settings: /voice backend|model|set",
 		handler: async (args, ctx) => {
 			// pi's declared type says `args: string`, but a bare command invocation
 			// passes nothing at all, so this must tolerate undefined.
-			const [action, value] = (args ?? "").trim().split(/\s+/);
+			const [action, ...rest] = (args ?? "").trim().split(/\s+/).filter(Boolean);
+			const value = rest.join(" ").trim();
 
 			if (action === "backend") {
-				let target = value ?? "";
+				let target = value;
 				if (!target) {
 					if (!ctx.hasUI) {
 						ctx.ui.notify("Pass a backend explicitly: /voice backend deepgram|parakeet", "warning");
@@ -111,11 +123,69 @@ export default async function betterPiVoice(pi: ExtensionAPI): Promise<void> {
 					ctx.ui.notify(`Voice backend is already ${target} (${backendLabel(current)}).`, "info");
 					return;
 				}
-				await writeSettings({ ...current, backend: target });
-				const label = backendLabel({ ...current, backend: target });
+				const next = { ...current, backend: target };
+				await writeSettings(next);
 				// Notify before reloading: the reload replaces this runtime, so
 				// nothing after the await may touch it.
-				ctx.ui.notify(`Voice backend set to ${label}. Reloading…`, "info");
+				ctx.ui.notify(`Voice backend set to ${backendLabel(next)}. Reloading…`, "info");
+				await ctx.reload();
+				return;
+			}
+
+			if (action === "model") {
+				const { settings: current } = await readSettings();
+				let target = value;
+				if (target) {
+					if (!existsSync(target)) {
+						ctx.ui.notify(`No file at ${target}.`, "warning");
+						return;
+					}
+				} else {
+					const models = await availableModels();
+					if (models.length === 0) {
+						ctx.ui.notify(
+							"No Parakeet models found under the Hugging Face cache. Pass a path: /voice model /path/to/model.gguf",
+							"warning",
+						);
+						return;
+					}
+					if (!ctx.hasUI) {
+						ctx.ui.notify(
+							`Pass a path explicitly. Available: ${models.map((model) => model.label).join(", ")}`,
+							"warning",
+						);
+						return;
+					}
+					const chosen = await ctx.ui.select(
+						"Parakeet model",
+						models.map((model) => model.label),
+					);
+					if (!chosen) return; // cancelled
+					target = models.find((model) => model.label === chosen)?.path ?? "";
+				}
+				if (!target) return;
+				const next = { ...current, parakeet: { ...current.parakeet, modelPath: target } };
+				await writeSettings(next);
+				ctx.ui.notify(`Parakeet model set to ${basename(target)}. Reloading…`, "info");
+				await ctx.reload();
+				return;
+			}
+
+			if (action === "set") {
+				if (rest.length < 2) {
+					ctx.ui.notify(`Usage: /voice set <key> <value>. Keys: ${SETTABLE_KEYS.join(", ")}.`, "warning");
+					return;
+				}
+				const key = rest[0]!;
+				const settingValue = rest.slice(1).join(" ").trim();
+				const { settings: current } = await readSettings();
+				const result = applySetting(current, key, settingValue);
+				if ("error" in result) {
+					ctx.ui.notify(result.error, "warning");
+					return;
+				}
+				await writeSettings(result.settings);
+				ctx.ui.notify(`${key} set to ${settingValue}. Reloading…`, "info");
 				await ctx.reload();
 				return;
 			}
@@ -163,6 +233,8 @@ export default async function betterPiVoice(pi: ExtensionAPI): Promise<void> {
 		disposed = false;
 		runtimePromise = undefined;
 		runtime = undefined;
+		const firstRun = await ensureFirstRunSettings();
+		if (firstRun) ctx.ui.notify(firstRun.message, firstRun.wrote ? "info" : "warning");
 		await ensureRuntime(ctx);
 	});
 

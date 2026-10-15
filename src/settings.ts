@@ -293,6 +293,101 @@ export function parseSettings(raw: unknown): { settings: VoiceSettings; warnings
 	};
 }
 
+export const SETTABLE_KEYS = [
+	"backend",
+	"mode",
+	"model",
+	"language",
+	"correction",
+	"submitOnStop",
+	"chunkSeconds",
+	"silenceLevel",
+	"shortcut",
+] as const;
+export type SettableKey = (typeof SETTABLE_KEYS)[number];
+
+/** The warning name `parseSettings` uses for each settable key. */
+const FIELD_FOR_KEY: Record<SettableKey, string> = {
+	backend: "backend",
+	mode: "mode",
+	model: "parakeet.modelPath",
+	language: "language",
+	correction: "correction",
+	submitOnStop: "submitOnStop",
+	chunkSeconds: "parakeet.chunkSeconds",
+	silenceLevel: "parakeet.silenceLevel",
+	shortcut: "shortcut",
+};
+
+function parseBooleanText(value: string): boolean | undefined {
+	const text = value.trim().toLowerCase();
+	if (["true", "1", "on", "yes"].includes(text)) return true;
+	if (["false", "0", "off", "no"].includes(text)) return false;
+	return undefined;
+}
+
+/** Coerce one typed-by-the-user value onto the object, or name why it cannot be. */
+function withSetting(settings: VoiceSettings, key: SettableKey, value: string): VoiceSettings | string {
+	switch (key) {
+		case "backend":
+			return { ...settings, backend: value as VoiceSettings["backend"] };
+		case "mode":
+			return { ...settings, mode: value as VoiceSettings["mode"] };
+		case "model":
+			return { ...settings, parakeet: { ...settings.parakeet, modelPath: value } };
+		case "language":
+			return { ...settings, language: value };
+		case "correction":
+			return { ...settings, correction: value as CorrectionMode };
+		case "shortcut":
+			return { ...settings, shortcut: value };
+		case "submitOnStop": {
+			const parsed = parseBooleanText(value);
+			return parsed === undefined ? "submitOnStop must be true or false." : { ...settings, submitOnStop: parsed };
+		}
+		case "chunkSeconds": {
+			const parsed = Number(value);
+			return !Number.isInteger(parsed) || parsed < 0
+				? "chunkSeconds must be an integer >= 0."
+				: { ...settings, parakeet: { ...settings.parakeet, chunkSeconds: parsed } };
+		}
+		case "silenceLevel": {
+			if (value.trim() === "auto") {
+				return { ...settings, parakeet: { ...settings.parakeet, silenceLevel: "auto" } };
+			}
+			const parsed = Number(value);
+			return !Number.isFinite(parsed) || parsed < 0
+				? `silenceLevel must be a number >= 0 or "auto".`
+				: { ...settings, parakeet: { ...settings.parakeet, silenceLevel: parsed } };
+		}
+	}
+}
+
+/**
+ * Apply one `/voice set <key> <value>` change.
+ *
+ * The value is coerced to its field's type, then the whole object is run
+ * through `parseSettings`: if the real parser would fall back on that field,
+ * the change is rejected rather than silently written as a default. That keeps
+ * one source of truth for what a valid value is.
+ */
+export function applySetting(
+	settings: VoiceSettings,
+	key: string,
+	value: string,
+): { settings: VoiceSettings } | { error: string } {
+	const field = FIELD_FOR_KEY[key as SettableKey];
+	if (!field) return { error: `Unknown setting "${key}". Try: ${SETTABLE_KEYS.join(", ")}.` };
+
+	const mutated = withSetting(settings, key as SettableKey, value);
+	if (typeof mutated === "string") return { error: mutated };
+
+	const { settings: parsed, warnings } = parseSettings(mutated);
+	const offender = warnings.find((warning) => warning.startsWith(field));
+	if (offender) return { error: offender };
+	return { settings: parsed };
+}
+
 /** Read the settings file. A missing file is not an error. */
 export async function readSettings(): Promise<{ settings: VoiceSettings; warnings: string[] }> {
 	let raw: unknown;

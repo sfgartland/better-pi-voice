@@ -85,9 +85,13 @@ A hard cap applies in both modes so a stuck key cannot leave the microphone open
 
 Commands:
 
-- `/voice` — backend, mode, shortcut, keyterm count, whether the key is visible, state
+- `/voice` — backend, model, mode, shortcut, keyterm count, whether the key is visible, state
 - `/voice backend` — pick a backend from a menu
 - `/voice backend deepgram|parakeet` — switch directly, then reload
+- `/voice model` — pick a local GGUF already in the Hugging Face cache, then reload
+- `/voice model /path/to/model.gguf` — use a specific model file
+- `/voice set <key> <value>` — set `backend`, `model`, `mode`, `language`, `correction`,
+  `submitOnStop`, `chunkSeconds`, `silenceLevel` or `shortcut`, then reload
 - `/voice-keyterms` — list custom terms
 - `/voice-keyterms add <term>` / `remove <term>`
 
@@ -95,6 +99,11 @@ The backend is **Deepgram by default**. Switching rewrites `better-pi-voice.json
 (fully expanded, so it stops looking like the minimal file you hand-wrote) and then
 reloads the extension so the change takes effect immediately. You can also just edit
 `"backend"` in the settings file and restart.
+
+On a first run with no settings file, voice configures itself: Deepgram when an API
+key is already reachable, otherwise the best local model already on disk. It then tells
+you which backend it chose and which key to hold. If neither is available it writes
+nothing and says what to set.
 
 ## Keyterms
 
@@ -258,7 +267,8 @@ malformed falls back to a default and warns rather than breaking the microphone.
   "parakeet": {
     "modelPath": null,                // null = read pi-voice's config if present
     "mode": "batch",                  // "batch" (faster, chunked) | "streaming"
-    "chunkSeconds": 15,               // cut at a pause near this length; 0 = only at the end
+    "chunkSeconds": 30,               // cut at a pause near this length; 0 = only at the end
+    "silenceLevel": "auto",           // "auto" derives the pause threshold per recording; a number pins it
     "idleUnloadMs": 0,                // 0 = release after each recording (see above)
     "loadShedRatio": 0.8              // with residency on, release early once load per CPU reaches this
   },

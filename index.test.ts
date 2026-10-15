@@ -1,5 +1,7 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { rmSync } from "node:fs";
+import { afterAll, beforeEach, describe, expect, test } from "bun:test";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createFakeCtx, createFakePi, isolateAgentDir } from "./test-support/fake-pi.ts";
 
 // Must run before the extension module is imported: it resolves its settings
@@ -43,6 +45,25 @@ async function load() {
 	await factory(pi.api);
 	return pi;
 }
+
+const HUB = join(process.env.XDG_CACHE_HOME ?? "", "huggingface", "hub");
+
+function addCachedModel(repo: string, file: string): string {
+	const dir = join(HUB, `models--test--${repo}`, "snapshots", "abc123");
+	mkdirSync(dir, { recursive: true });
+	const path = join(dir, file);
+	writeFileSync(path, "not a real model");
+	return path;
+}
+
+// Each test starts from the same configured install, so order cannot leak state.
+beforeEach(async () => {
+	rmSync(HUB, { recursive: true, force: true });
+	await writeSettings({
+		...DEFAULT_SETTINGS,
+		parakeet: { ...DEFAULT_SETTINGS.parakeet, modelPath: "/models/parakeet-unified-en-0.6b-Q8_0.gguf" },
+	});
+});
 
 describe("command argument handling", () => {
 	test("/voice with no arguments reports status instead of throwing", async () => {
@@ -169,5 +190,139 @@ describe("/voice-keyterms", () => {
 
 		expect(notifications[0]!.message).toContain("already");
 		expect((await readSettings()).settings.keyterms.user.filter((t) => t.toLowerCase() === "zzzdupe").length).toBe(1);
+	});
+});
+
+describe("/voice set", () => {
+	test("sets a numeric chunk length and reloads", async () => {
+		const pi = await load();
+		const { ctx, notifications, reloads } = makeCtx();
+
+		await pi.run("voice", "set chunkSeconds 45", ctx);
+
+		expect((await readSettings()).settings.parakeet.chunkSeconds).toBe(45);
+		expect(notifications[0]!.message).toContain("chunkSeconds");
+		expect(reloads()).toBe(1);
+	});
+
+	test("sets booleans, enums and the auto silence level", async () => {
+		const pi = await load();
+
+		await pi.run("voice", "set submitOnStop true", makeCtx().ctx);
+		expect((await readSettings()).settings.submitOnStop).toBe(true);
+
+		await pi.run("voice", "set correction report", makeCtx().ctx);
+		expect((await readSettings()).settings.correction).toBe("report");
+
+		await pi.run("voice", "set mode tap", makeCtx().ctx);
+		expect((await readSettings()).settings.mode).toBe("tap");
+
+		await pi.run("voice", "set silenceLevel auto", makeCtx().ctx);
+		expect((await readSettings()).settings.parakeet.silenceLevel).toBe("auto");
+
+		await pi.run("voice", "set silenceLevel 0.4", makeCtx().ctx);
+		expect((await readSettings()).settings.parakeet.silenceLevel).toBe(0.4);
+	});
+
+	test("rejects a value the parser would fall back on, without writing", async () => {
+		const pi = await load();
+		const { ctx, notifications, reloads } = makeCtx();
+
+		await pi.run("voice", "set correction bogus", ctx);
+
+		expect((await readSettings()).settings.correction).toBe("safe");
+		expect(notifications[0]!.message.toLowerCase()).toContain("correction");
+		expect(reloads()).toBe(0);
+	});
+
+	test("rejects a non-numeric chunk length", async () => {
+		const pi = await load();
+		const { ctx, notifications, reloads } = makeCtx();
+
+		await pi.run("voice", "set chunkSeconds soon", ctx);
+
+		expect((await readSettings()).settings.parakeet.chunkSeconds).toBe(30);
+		expect(notifications.length).toBe(1);
+		expect(reloads()).toBe(0);
+	});
+
+	test("rejects an unknown setting", async () => {
+		const pi = await load();
+		const { ctx, notifications, reloads } = makeCtx();
+
+		await pi.run("voice", "set frobnicate yes", ctx);
+
+		expect(notifications[0]!.message).toContain("Unknown setting");
+		expect(reloads()).toBe(0);
+	});
+
+	test("a bare /voice set explains the keys instead of throwing", async () => {
+		const pi = await load();
+		const { ctx, notifications } = makeCtx();
+
+		await pi.run("voice", "set", ctx);
+
+		expect(notifications[0]!.message).toContain("set <key> <value>");
+	});
+});
+
+describe("/voice model", () => {
+	test("accepts an explicit path", async () => {
+		const file = join(tmpdir(), `better-pi-voice-model-${String(process.pid)}.gguf`);
+		writeFileSync(file, "not a real model");
+		const pi = await load();
+		const { ctx, notifications, reloads } = makeCtx();
+
+		await pi.run("voice", `model ${file}`, ctx);
+
+		expect((await readSettings()).settings.parakeet.modelPath).toBe(file);
+		expect(notifications[0]!.message).toContain("better-pi-voice-model");
+		expect(reloads()).toBe(1);
+		rmSync(file, { force: true });
+	});
+
+	test("rejects a path that does not exist", async () => {
+		const pi = await load();
+		const { ctx, notifications, reloads } = makeCtx();
+
+		await pi.run("voice", "model /nope/missing.gguf", ctx);
+
+		expect((await readSettings()).settings.parakeet.modelPath).toBe("/models/parakeet-unified-en-0.6b-Q8_0.gguf");
+		expect(notifications[0]!.message).toContain("No file");
+		expect(reloads()).toBe(0);
+	});
+
+	test("picks from the models already on disk", async () => {
+		addCachedModel("parakeet-tdt_ctc-110m-gguf", "parakeet-tdt_ctc-110m-Q8_0.gguf");
+		const pi = await load();
+		const { ctx, notifications, reloads } = makeCtx({ select: ["parakeet-tdt_ctc-110m-Q8_0"] });
+
+		await pi.run("voice", "model", ctx);
+
+		expect((await readSettings()).settings.parakeet.modelPath).toContain("parakeet-tdt_ctc-110m");
+		expect(notifications[0]!.message).toContain("parakeet-tdt_ctc-110m");
+		expect(reloads()).toBe(1);
+	});
+
+	test("a cancelled picker changes nothing", async () => {
+		addCachedModel("parakeet-tdt_ctc-110m-gguf", "parakeet-tdt_ctc-110m-Q8_0.gguf");
+		const pi = await load();
+		const { ctx, notifications, reloads } = makeCtx({ select: [] });
+
+		await pi.run("voice", "model", ctx);
+
+		expect((await readSettings()).settings.parakeet.modelPath).toBe("/models/parakeet-unified-en-0.6b-Q8_0.gguf");
+		expect(notifications).toEqual([]);
+		expect(reloads()).toBe(0);
+	});
+
+	test("says so when no model is on disk", async () => {
+		const pi = await load();
+		const { ctx, notifications, reloads } = makeCtx();
+
+		await pi.run("voice", "model", ctx);
+
+		expect(notifications[0]!.message).toContain("No Parakeet models");
+		expect(reloads()).toBe(0);
 	});
 });

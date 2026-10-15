@@ -12,10 +12,10 @@
  * and the same interim/final event shape.
  */
 
-import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { cpus, loadavg } from "node:os";
-import { join } from "node:path";
+import { type Dirent, existsSync } from "node:fs";
+import { readdir, readFile } from "node:fs/promises";
+import { cpus, homedir, loadavg } from "node:os";
+import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { type Clock, systemClock, type TimerHandle } from "../clock.ts";
@@ -158,6 +158,62 @@ export async function resolveParakeetModelPath(explicit: string | null): Promise
 	}
 
 	return undefined;
+}
+
+export type AvailableModel = { label: string; path: string };
+
+/** Directories that may hold a Hugging Face Hub cache, most specific first. */
+function huggingFaceHubDirs(): string[] {
+	const hfHome = process.env.HF_HOME?.trim();
+	if (hfHome) return [join(hfHome, "hub")];
+	const xdgCache = process.env.XDG_CACHE_HOME?.trim();
+	if (xdgCache) return [join(xdgCache, "huggingface", "hub")];
+	return [join(homedir(), ".cache", "huggingface", "hub")];
+}
+
+/** Deep enough for a repo/hash/subdirectory layout, bounded so a bad tree cannot run away. */
+const MAX_GGUF_DEPTH = 6;
+
+async function findGgufs(dir: string, depth = 0): Promise<string[]> {
+	if (depth > MAX_GGUF_DEPTH) return [];
+	let entries: Dirent[];
+	try {
+		entries = await readdir(dir, { withFileTypes: true });
+	} catch {
+		return [];
+	}
+	const found: string[] = [];
+	for (const entry of entries) {
+		const full = join(dir, entry.name);
+		if (entry.isDirectory()) found.push(...(await findGgufs(full, depth + 1)));
+		// Snapshot files are frequently symlinks into the repo's `blobs/` directory.
+		else if ((entry.isFile() || entry.isSymbolicLink()) && /\.gguf$/i.test(entry.name)) found.push(full);
+	}
+	return found;
+}
+
+/**
+ * Parakeet GGUFs already on this machine, under the Hugging Face Hub cache.
+ * Downloads are deliberately not offered: this is a picker for what can run now.
+ */
+export async function availableModels(): Promise<AvailableModel[]> {
+	const byLabel = new Map<string, AvailableModel>();
+	for (const hub of huggingFaceHubDirs()) {
+		let repos: Dirent[];
+		try {
+			repos = await readdir(hub, { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		for (const repo of repos.sort((a, b) => a.name.localeCompare(b.name))) {
+			if (!repo.isDirectory() || !repo.name.startsWith("models--")) continue;
+			for (const path of await findGgufs(join(hub, repo.name, "snapshots"))) {
+				const label = basename(path).replace(/\.gguf$/i, "");
+				if (!byLabel.has(label)) byLabel.set(label, { label, path });
+			}
+		}
+	}
+	return [...byLabel.values()].sort((a, b) => a.label.localeCompare(b.label));
 }
 
 /**
