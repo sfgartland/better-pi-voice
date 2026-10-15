@@ -39,6 +39,13 @@ export type VoiceSettings = {
 		mode: "streaming" | "batch";
 		/** Batch mode: chunk length while recording. 0 waits until the end. */
 		chunkSeconds: number;
+		/**
+		 * Batch mode: how quiet a boundary must be to cut at. Lower is stricter.
+		 * A noisy room (music, traffic) may never reach the default, in which case
+		 * nothing is chunked; raising it trades seam quality for incrementality.
+		 * Safe to raise only with a model that tolerates mid-utterance starts.
+		 */
+		silenceLevel: number;
 		/** Hold the model in memory this long after the last recording. */
 		idleUnloadMs: number;
 		/** Hand the memory back early once load per CPU reaches this. */
@@ -75,6 +82,12 @@ export const DEFAULT_SETTINGS: VoiceSettings = {
 		// arrives while you speak, in pieces, rather than all at the end.
 		mode: "batch",
 		chunkSeconds: 15,
+		// 0.05 is digital near-silence and never occurs in a real room, so chunking
+		// would silently never run. 0.35 is a real pause relative to normal room
+		// tone, and is safe with the recommended model, which tolerates a chunk
+		// starting mid-utterance. Lower it toward 0.05 for a model that does not,
+		// such as canary, which returns an empty transcript for such a start.
+		silenceLevel: 0.35,
 		// Load is fast enough on the machines this was built for (about 0.4s
 		// warm) that holding ~700MB between recordings is not worth it. The
 		// residency machinery below stays for larger models and other hardware.
@@ -231,6 +244,12 @@ export function parseSettings(raw: unknown): { settings: VoiceSettings; warnings
 					parakeet.chunkSeconds,
 					DEFAULT_SETTINGS.parakeet.chunkSeconds,
 					"parakeet.chunkSeconds",
+					warnings,
+				),
+				silenceLevel: pickNumber(
+					parakeet.silenceLevel,
+					DEFAULT_SETTINGS.parakeet.silenceLevel,
+					"parakeet.silenceLevel",
 					warnings,
 				),
 				idleUnloadMs: pickInteger(

@@ -194,8 +194,15 @@ the tail is left when you release the key:
 - when the buffer reaches `parakeet.chunkSeconds` (default 15), it is cut **at a real
   pause** and transcribed in the background; that text appears immediately
 - `parakeet.chunkSeconds: 0` disables chunking and transcribes once, at the end
-- a chunk is only cut where the signal is genuinely silent. If speech never pauses,
-  nothing is cut and the whole utterance is transcribed in one piece
+- a chunk is only cut where the signal is quiet enough to be a pause
+  (`parakeet.silenceLevel`, default 0.35). If speech never pauses, nothing is cut and
+  the whole utterance is transcribed in one piece
+- **the default is calibrated for a model that tolerates a chunk starting mid-word**,
+  which the recommended `parakeet-tdt_ctc-110m` does. It matters: `canary-180m-flash`
+  returns an *empty* transcript for any clip that starts mid-utterance — measured at
+  offsets 4, 6, 8 and 10 s into a 24 s clip, it produced 0 characters every time, while
+  parakeet-tdt_ctc-110m produced 292, 253, 215 and 192. If you use canary, set
+  `silenceLevel` to 0.05 so cuts only happen at true silence.
 
 That last rule is not fussiness. Cutting mid-utterance loses words outright: canary
 returns an **empty transcript** for any clip that begins mid-sentence, so a chunk cut at

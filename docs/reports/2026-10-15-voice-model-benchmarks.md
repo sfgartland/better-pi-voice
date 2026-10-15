@@ -90,3 +90,61 @@ machine: the slowest streaming model paired with the mode that is 2–8× slower
 timeout 1800 bun /tmp/voice-bench/bench.ts
 # raw numbers, including per-run spread and host load: /tmp/voice-bench/results.json
 ```
+
+---
+
+## Addendum: measured on real speech
+
+A 12 s recording of the actual user (16 kHz mono), so accuracy numbers stop being
+inherited from the curated table.
+
+### The recording contains music, and no silence at all
+
+| | value |
+|---|---|
+| minimum 100 ms level | 0.307 |
+| 10th percentile | 0.406 |
+| median | 0.930 |
+| chunks at or below 0.05 | **0 of 120** |
+
+Background music plays for the first part of the clip and the user says so on the
+recording. Even after it stops there is no near-silence, only normal room tone. This
+matters more than it looks: **an absolute silence threshold never fires in a real
+room**, so pause-aware chunking would silently never run. `parakeet.silenceLevel`
+therefore defaults to 0.35 rather than 0.05.
+
+### Batch transcription of the real recording
+
+| model | size | load | transcribe | RTF | text |
+|---|---|---|---|---|---|
+| **parakeet-tdt_ctc-110m** | 135 MB | 686 ms | 2 843 ms | **4.22** | correct, capitalised and punctuated |
+| SenseVoiceSmall | 253 MB | 1 880 ms | 3 062 ms | 3.92 | correct but lowercased, no punctuation |
+| canary-180m-flash | 218 MB | 3 738 ms | 3 158 ms | 3.80 | correct, capitalised and punctuated |
+| parakeet-tdt-0.6b-v2 | 730 MB | 8 644 ms | 11 552 ms | 1.04 | correct |
+| whisper-small | 270 MB | 1 617 ms | 12 254 ms | 0.98 | correct |
+| parakeet-unified-0.6b | 731 MB | 2 634 ms | 22 193 ms | 0.54 | correct |
+
+Every model got the words right; the differences are capitalisation and punctuation.
+So on a 12 s clip, accuracy does not separate them — speed and size do, and
+`parakeet-tdt_ctc-110m` wins both: fastest, smallest, and the quickest to load.
+
+### Chunk safety: does a model accept audio starting mid-utterance?
+
+Characters transcribed from a 24 s clip sliced at increasing offsets. A chunked batch
+implementation cuts audio, so every chunk after the first starts mid-utterance.
+
+| model | 0 s | 4 s | 6 s | 8 s | 10 s | 12 s |
+|---|---|---|---|---|---|---|
+| **parakeet-tdt_ctc-110m** | 318 | 292 | 253 | 215 | 192 | 164 |
+| SenseVoiceSmall | 316 | 288 | 249 | 233 | 99 | 162 |
+| canary-180m-flash | 318 | **0** | **0** | **0** | **0** | 164 |
+
+`parakeet-tdt_ctc-110m` degrades smoothly and never fails. **`canary-180m-flash`
+returns an empty transcript for every mid-utterance start**, which disqualifies it for
+chunked batch use entirely — a cut inside a word would silently discard that chunk.
+
+### Conclusion
+
+Switch the default model from `canary-180m-flash` to **`parakeet-tdt_ctc-110m`**
+(135 MB): it is the fastest on real speech, the smallest, the fastest to load, and the
+only one of the small models verified to survive an arbitrary chunk boundary.

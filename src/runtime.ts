@@ -35,6 +35,7 @@ export function createBackend(settings: VoiceSettings): VoiceBackend {
 			language: settings.language,
 			mode: settings.parakeet.mode,
 			chunkSeconds: settings.parakeet.chunkSeconds,
+			silenceLevel: settings.parakeet.silenceLevel,
 			idleUnloadMs: settings.parakeet.idleUnloadMs,
 			loadShedRatio: settings.parakeet.loadShedRatio,
 		});

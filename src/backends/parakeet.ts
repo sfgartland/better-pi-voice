@@ -195,6 +195,8 @@ export type ParakeetBackendOptions = {
 	mode?: "streaming" | "batch" | undefined;
 	/** Batch mode: chunk length while recording. 0 transcribes only at the end. */
 	chunkSeconds?: number | undefined;
+	/** Batch mode: level at or below which a boundary counts as a real pause. */
+	silenceLevel?: number | undefined;
 	/**
 	 * Keep the model in memory this long after the last session, because loading
 	 * it is slow enough that unloading immediately would be felt on the next
@@ -361,6 +363,8 @@ export const DEFAULT_CHUNK_SECONDS = 15;
 export type BatchStreamOptions = {
 	/** 0 disables incremental chunks and transcribes everything at finalize. */
 	chunkSeconds: number;
+	/** Level at or below which a boundary counts as a real pause. */
+	silenceLevel: number;
 	transcribe(pcm: Float32Array): Promise<string>;
 	emit(event: VoiceEvent): void;
 	/** Called once when the session ends, so residency can be scheduled. */
@@ -460,7 +464,7 @@ class ParakeetBatchStream implements VoiceStream {
 			}
 		}
 		// No pause to cut at, so do not cut at all.
-		if (bestIndex < 0 || bestLevel > SILENCE_LEVEL) return;
+		if (bestIndex < 0 || bestLevel > this.options.silenceLevel) return;
 
 		const taken = this.chunks.slice(0, bestIndex + 1);
 		this.chunks = this.chunks.slice(bestIndex + 1);
@@ -658,6 +662,7 @@ export class ParakeetBackend implements VoiceBackend {
 			// tail is left to transcribe when the recording stops.
 			return new ParakeetBatchStream({
 				chunkSeconds: this.options.chunkSeconds ?? DEFAULT_CHUNK_SECONDS,
+				silenceLevel: this.options.silenceLevel ?? SILENCE_LEVEL,
 				emit,
 				onReleased: () => this.scheduleIdleUnload(),
 				transcribe: async (pcm) => (await model.transcribe(pcm, { language, timestamps: "none" })).text,
