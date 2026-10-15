@@ -1,0 +1,59 @@
+{
+	"name": "@sfgartland/pi-add-better-pi-voice",
+	"version": "0.1.0",
+	"description": "Streaming voice input for pi: Deepgram (nova-3, repo-aware keyterms) or local Parakeet, with Claude-Code-style recovery so speech is never lost.",
+	"license": "MIT",
+	"author": "sfgartland",
+	"type": "module",
+	"engines": {
+		"node": ">=20"
+	},
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/sfgartland/pi-extensions",
+		"directory": "packages/add/pi-add-better-pi-voice"
+	},
+	"homepage": "https://github.com/sfgartland/pi-add-better-pi-voice#readme",
+	"bugs": {
+		"url": "https://github.com/sfgartland/pi-extensions/issues"
+	},
+	"keywords": [
+		"pi-package",
+		"pi",
+		"pi-extension",
+		"voice",
+		"dictation",
+		"speech-to-text",
+		"deepgram",
+		"parakeet",
+		"keyterms"
+	],
+	"files": [
+		"index.ts",
+		"src/",
+		"README.md",
+		"LICENSE"
+	],
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*"
+	},
+	"optionalDependencies": {
+		"transcribe-cpp": "*"
+	},
+	"pi": {
+		"extensions": [
+			"./index.ts"
+		]
+	},
+	"scripts": {
+		"typecheck": "tsc --noEmit",
+		"lint": "biome check .",
+		"test": "bun test",
+		"check": "npm run typecheck && npm run lint && npm test"
+	},
+	"publishConfig": {
+		"access": "public",
+		"registry": "https://registry.npmjs.org/"
+	}
+}
