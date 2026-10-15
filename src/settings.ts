@@ -40,12 +40,11 @@ export type VoiceSettings = {
 		/** Batch mode: chunk length while recording. 0 waits until the end. */
 		chunkSeconds: number;
 		/**
-		 * Batch mode: how quiet a boundary must be to cut at. Lower is stricter.
-		 * A noisy room (music, traffic) may never reach the default, in which case
-		 * nothing is chunked; raising it trades seam quality for incrementality.
-		 * Safe to raise only with a model that tolerates mid-utterance starts.
+		 * Batch mode: how quiet a boundary must be to cut at. "auto" derives it from
+		 * each recording's own noise floor, which is what works across rooms; a number
+		 * pins it. Lower is stricter.
 		 */
-		silenceLevel: number;
+		silenceLevel: number | "auto";
 		/** Hold the model in memory this long after the last recording. */
 		idleUnloadMs: number;
 		/** Hand the memory back early once load per CPU reaches this. */
@@ -82,12 +81,10 @@ export const DEFAULT_SETTINGS: VoiceSettings = {
 		// arrives while you speak, in pieces, rather than all at the end.
 		mode: "batch",
 		chunkSeconds: 15,
-		// 0.05 is digital near-silence and never occurs in a real room, so chunking
-		// would silently never run. 0.35 is a real pause relative to normal room
-		// tone, and is safe with the recommended model, which tolerates a chunk
-		// starting mid-utterance. Lower it toward 0.05 for a model that does not,
-		// such as canary, which returns an empty transcript for such a start.
-		silenceLevel: 0.35,
+		// Derived per recording. A fixed number cannot span rooms: one recording
+		// measured here never dropped below 0.05 (music playing) while another
+		// paused around 0.3. Pin a number only to override that.
+		silenceLevel: "auto",
 		// Load is fast enough on the machines this was built for (about 0.4s
 		// warm) that holding ~700MB between recordings is not worth it. The
 		// residency machinery below stays for larger models and other hardware.
@@ -155,6 +152,14 @@ function pickNumber(value: unknown, fallback: number, field: string, warnings: s
 	if (typeof value === "number" && Number.isFinite(value) && value >= min) return value;
 	warnings.push(`${field} must be a number >= ${min}; using ${fallback}.`);
 	return fallback;
+}
+
+/** A level threshold, or the string "auto" to derive one per recording. */
+function pickNumberOrAuto(value: unknown, field: string, warnings: string[]): number | "auto" {
+	if (value === undefined || value === "auto") return "auto";
+	if (typeof value === "number" && Number.isFinite(value) && value >= 0) return value;
+	warnings.push(`${field} must be a number >= 0 or "auto"; using "auto".`);
+	return "auto";
 }
 
 function pickEnum<T extends string>(
@@ -246,12 +251,7 @@ export function parseSettings(raw: unknown): { settings: VoiceSettings; warnings
 					"parakeet.chunkSeconds",
 					warnings,
 				),
-				silenceLevel: pickNumber(
-					parakeet.silenceLevel,
-					DEFAULT_SETTINGS.parakeet.silenceLevel,
-					"parakeet.silenceLevel",
-					warnings,
-				),
+				silenceLevel: pickNumberOrAuto(parakeet.silenceLevel, "parakeet.silenceLevel", warnings),
 				idleUnloadMs: pickInteger(
 					parakeet.idleUnloadMs,
 					DEFAULT_SETTINGS.parakeet.idleUnloadMs,

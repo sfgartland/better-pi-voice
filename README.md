@@ -194,9 +194,15 @@ the tail is left when you release the key:
 - when the buffer reaches `parakeet.chunkSeconds` (default 15), it is cut **at a real
   pause** and transcribed in the background; that text appears immediately
 - `parakeet.chunkSeconds: 0` disables chunking and transcribes once, at the end
-- a chunk is only cut where the signal is quiet enough to be a pause
-  (`parakeet.silenceLevel`, default 0.35). If speech never pauses, nothing is cut and
-  the whole utterance is transcribed in one piece
+- a chunk is only cut where the signal is quiet enough to be a pause. The threshold is
+  **derived from each recording** (`parakeet.silenceLevel: "auto"`): the noise floor comes
+  from the 10th percentile of the level distribution and speech from the 75th, and a
+  boundary counts as a pause when it falls in the lowest 30% of that range. A fixed number
+  cannot span rooms — of two real recordings measured here, one never dropped below 0.05
+  (music playing) and the other paused around 0.3. Pin a number to override.
+- when the level barely varies there is no pause structure to find, so nothing is cut and
+  the whole utterance is transcribed in one piece. That is the safe answer for unbroken
+  speech and for steady background noise.
 - **the default is calibrated for a model that tolerates a chunk starting mid-word**,
   which the recommended `parakeet-tdt_ctc-110m` does. It matters: `canary-180m-flash`
   returns an *empty* transcript for any clip that starts mid-utterance — measured at

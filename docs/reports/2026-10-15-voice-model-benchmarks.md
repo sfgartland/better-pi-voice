@@ -148,3 +148,21 @@ chunked batch use entirely — a cut inside a word would silently discard that c
 Switch the default model from `canary-180m-flash` to **`parakeet-tdt_ctc-110m`**
 (135 MB): it is the fastest on real speech, the smallest, the fastest to load, and the
 only one of the small models verified to survive an arbitrary chunk boundary.
+
+### Addendum 2: an automatic pause threshold
+
+A second recording (12 s, this time with deliberate pauses) showed why a fixed threshold
+cannot work. The two real recordings:
+
+| recording | p10 (noise) | p75 (speech) | auto threshold | pauses found |
+|---|---|---|---|---|
+| `my-speech` (music) | 0.406 | 1.000 | 0.584 | 10 runs |
+| `my-speech-2` (quiet, pausing) | 0.307 | 1.000 | 0.515 | 0.1–1.0 s, 3.9–5.6 s, 8.5–10.0 s |
+
+A fixed 0.05 found no pause in either; a fixed 0.35 found few. So `silenceLevel` now
+defaults to `"auto"`: noise from the 10th percentile, speech from the 75th, and a boundary
+counts as a pause below 30% of that range. When the level barely varies the range collapses
+and nothing is cut, which is the correct answer for unbroken speech or steady noise.
+
+Verified end to end on a 24 s doubling of the real recording with `parakeet-tdt_ctc-110m`:
+two chunks of 12.9 s and 11.1 s, both transcribed, 24.0 s accounted for, nothing lost.

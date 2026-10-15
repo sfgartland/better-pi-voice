@@ -194,13 +194,16 @@ describe("batch mode", () => {
 		return { model, calls, failWith: (error: Error) => (failure = error) };
 	}
 
-	function makeBatchBackend(options: { chunkSeconds: number; texts?: string[] } = { chunkSeconds: 15 }) {
+	function makeBatchBackend(
+		options: { chunkSeconds: number; texts?: string[]; silenceLevel?: number | "auto" } = { chunkSeconds: 15 },
+	) {
 		const recorder = recordingModel(options.texts);
 		const events: VoiceEvent[] = [];
 		const backend = new ParakeetBackend({
 			modelPath: modelFile,
 			mode: "batch",
 			chunkSeconds: options.chunkSeconds,
+			silenceLevel: options.silenceLevel,
 			loadModel: async () => recorder.model as never,
 			idleUnloadMs: 0,
 		});
@@ -339,6 +342,58 @@ describe("batch mode", () => {
 		const errors = h.events.filter((event) => event.type === "error");
 		expect(errors.length).toBe(1);
 		expect(errors[0]?.message).toContain("out of memory");
+	});
+
+	test("derives the pause threshold from the recording's own noise floor", async () => {
+		// A noisy room: room tone sits at level 0.30, speech at 1.00, so the
+		// adaptive threshold lands near 0.51 and a 0.30 boundary counts as a pause.
+		// A fixed threshold would have found nothing here.
+		const noise = pcmOf(180, HUNDRED_MS); // level ~0.30
+		const h = makeBatchBackend({ chunkSeconds: 1, silenceLevel: "auto" });
+		const stream = await startStream(h);
+
+		for (let i = 0; i < 7; i++) stream.feed(loud);
+		for (let i = 0; i < 3; i++) stream.feed(noise);
+		for (let i = 0; i < 5; i++) stream.feed(loud);
+		await settle();
+
+		expect(h.recorder.calls.length).toBe(1);
+		expect(h.recorder.calls[0]).toBe(8 * HUNDRED_MS);
+	});
+
+	test("will not cut when the level never varies, however loud it is", async () => {
+		// Steady music or a fan: there is no pause structure to find, so nothing is
+		// cut even though the level is well above zero.
+		const steady = pcmOf(180, HUNDRED_MS);
+		const h = makeBatchBackend({ chunkSeconds: 1, silenceLevel: "auto" });
+		const stream = await startStream(h);
+
+		for (let i = 0; i < 40; i++) stream.feed(steady);
+		await settle();
+		expect(h.recorder.calls).toEqual([]);
+
+		await stream.finalize();
+		expect(h.recorder.calls).toEqual([40 * HUNDRED_MS]);
+	});
+
+	test("a pinned threshold overrides the automatic one", async () => {
+		const noise = pcmOf(180, HUNDRED_MS); // level ~0.30
+		const strict = makeBatchBackend({ chunkSeconds: 1, silenceLevel: 0.05 });
+		const strictStream = await startStream(strict);
+		for (let i = 0; i < 7; i++) strictStream.feed(loud);
+		for (let i = 0; i < 3; i++) strictStream.feed(noise);
+		for (let i = 0; i < 5; i++) strictStream.feed(loud);
+		await settle();
+		// 0.30 is not below a pinned 0.05, so nothing is cut.
+		expect(strict.recorder.calls).toEqual([]);
+
+		const loose = makeBatchBackend({ chunkSeconds: 1, silenceLevel: 0.6 });
+		const looseStream = await startStream(loose);
+		for (let i = 0; i < 7; i++) looseStream.feed(loud);
+		for (let i = 0; i < 3; i++) looseStream.feed(noise);
+		for (let i = 0; i < 5; i++) looseStream.feed(loud);
+		await settle();
+		expect(loose.recorder.calls.length).toBe(1);
 	});
 
 	test("close releases the model, so residency can start its timer", async () => {

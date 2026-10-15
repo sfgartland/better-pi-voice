@@ -196,7 +196,7 @@ export type ParakeetBackendOptions = {
 	/** Batch mode: chunk length while recording. 0 transcribes only at the end. */
 	chunkSeconds?: number | undefined;
 	/** Batch mode: level at or below which a boundary counts as a real pause. */
-	silenceLevel?: number | undefined;
+	silenceLevel?: number | "auto" | undefined;
 	/**
 	 * Keep the model in memory this long after the last session, because loading
 	 * it is slow enough that unloading immediately would be felt on the next
@@ -364,7 +364,7 @@ export type BatchStreamOptions = {
 	/** 0 disables incremental chunks and transcribes everything at finalize. */
 	chunkSeconds: number;
 	/** Level at or below which a boundary counts as a real pause. */
-	silenceLevel: number;
+	silenceLevel: number | "auto";
 	transcribe(pcm: Float32Array): Promise<string>;
 	emit(event: VoiceEvent): void;
 	/** Called once when the session ends, so residency can be scheduled. */
@@ -382,7 +382,11 @@ const MIN_CHUNK_FRACTION = 0.7;
  * "quietest point" cut silently discards a whole chunk. Continuous speech with
  * no pause therefore stays in one piece and is transcribed when recording ends.
  */
-const SILENCE_LEVEL = 0.05;
+const SILENCE_LEVEL = 0.35;
+/** Below this much variation there is no pause to find, so nothing is cut. */
+const MIN_DYNAMIC_RANGE = 0.1;
+/** Where in the noise-to-speech range a boundary stops counting as speech. */
+const PAUSE_RANGE_FRACTION = 0.3;
 
 class ParakeetBatchStream implements VoiceStream {
 	private chunks: Buffer[] = [];
@@ -437,13 +441,43 @@ class ParakeetBatchStream implements VoiceStream {
 	}
 
 	/**
+	 * Where a pause starts, derived from this recording rather than from a fixed
+	 * number.
+	 *
+	 * A fixed threshold cannot work across rooms: measured here, one recording
+	 * never dropped below 0.05 (music playing) while another paused around 0.3.
+	 * So the floor and the speech level are taken from the buffer's own level
+	 * distribution and a pause is anything in the lowest part of that range.
+	 *
+	 * When the level barely varies there is no pause structure to find, and this
+	 * returns undefined so nothing is cut. That is the safe answer for unbroken
+	 * speech or steady background noise.
+	 */
+	private pauseThreshold(): number | undefined {
+		const configured = this.options.silenceLevel;
+		if (typeof configured === "number") return configured;
+
+		const levels = this.levels;
+		if (levels.length < 8) return undefined;
+		const sorted = [...levels].sort((a, b) => a - b);
+		const at = (p: number) => sorted[Math.floor(p * (sorted.length - 1))]!;
+		const noise = at(0.1);
+		const speech = at(0.75);
+		const range = speech - noise;
+		if (range < MIN_DYNAMIC_RANGE) return undefined;
+		return noise + PAUSE_RANGE_FRACTION * range;
+	}
+
+	/**
 	 * Take the quietest boundary that keeps the chunk within the target window,
-	 * but only when that boundary is genuinely silent. Returning without cutting
+	 * but only when that boundary is genuinely a pause. Returning without cutting
 	 * is the safe outcome: the buffer keeps growing and is transcribed whole
 	 * later, which costs tail latency instead of costing words.
 	 */
 	private cutIfReady(): void {
 		if (this.bytes < this.chunkBytes) return;
+		const threshold = this.pauseThreshold();
+		if (threshold === undefined) return;
 
 		const minKeep = this.chunkBytes * MIN_CHUNK_FRACTION;
 
@@ -464,7 +498,7 @@ class ParakeetBatchStream implements VoiceStream {
 			}
 		}
 		// No pause to cut at, so do not cut at all.
-		if (bestIndex < 0 || bestLevel > this.options.silenceLevel) return;
+		if (bestIndex < 0 || bestLevel > threshold) return;
 
 		const taken = this.chunks.slice(0, bestIndex + 1);
 		this.chunks = this.chunks.slice(bestIndex + 1);
