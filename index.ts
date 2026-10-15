@@ -88,7 +88,9 @@ export default async function betterPiVoice(pi: ExtensionAPI): Promise<void> {
 	pi.registerCommand("voice", {
 		description: "Voice input status; /voice backend [deepgram|parakeet] to switch",
 		handler: async (args, ctx) => {
-			const [action, value] = args.trim().split(/\s+/);
+			// pi's declared type says `args: string`, but a bare command invocation
+			// passes nothing at all, so this must tolerate undefined.
+			const [action, value] = (args ?? "").trim().split(/\s+/);
 
 			if (action === "backend") {
 				let target = value ?? "";
@@ -126,7 +128,7 @@ export default async function betterPiVoice(pi: ExtensionAPI): Promise<void> {
 	pi.registerCommand("voice-keyterms", {
 		description: "List, add or remove custom voice keyterms",
 		handler: async (args, ctx) => {
-			const [action, ...rest] = args.trim().split(/\s+/);
+			const [action, ...rest] = (args ?? "").trim().split(/\s+/);
 			const value = rest.join(" ").trim();
 			if (action === "add" && value) {
 				ctx.ui.notify(await addUserKeyterm(value), "info");
