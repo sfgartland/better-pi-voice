@@ -70,7 +70,10 @@ The key is never written into the settings file.
 ## Use
 
 The default binding is `ctrl+alt+z`; **hold it while you speak and release**. The
-status line shows what is happening and an audio-level meter appears above the editor.
+status line names the active backend and model (`● deepgram nova-3: listening`,
+`transcribing with parakeet parakeet-unified-en-0.6b…`) and keeps showing it while
+idle, so it is always obvious which one is listening. An audio-level meter appears
+above the editor while recording.
 
 | Mode | Start | Stop | Safety |
 |---|---|---|---|
@@ -82,8 +85,15 @@ A hard cap applies in both modes so a stuck key cannot leave the microphone open
 Commands:
 
 - `/voice` — backend, mode, shortcut, keyterm count, whether the key is visible, state
+- `/voice backend` — pick a backend from a menu
+- `/voice backend deepgram|parakeet` — switch directly, then reload
 - `/voice-keyterms` — list custom terms
 - `/voice-keyterms add <term>` / `remove <term>`
+
+The backend is **Deepgram by default**. Switching rewrites `better-pi-voice.json`
+(fully expanded, so it stops looking like the minimal file you hand-wrote) and then
+reloads the extension so the change takes effect immediately. You can also just edit
+`"backend"` in the settings file and restart.
 
 ## Keyterms
 

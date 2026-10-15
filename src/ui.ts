@@ -79,20 +79,27 @@ export class EditorSink {
 	}
 }
 
+/**
+ * The status line. `label` names the backend and the model, so it is always
+ * obvious which one is listening — that is the first question when dictation
+ * comes back wrong.
+ */
 export function statusText(
 	state: "idle" | "arming" | "recording" | "processing" | "paused",
-	backend: string,
+	label: string,
 ): string | undefined {
 	switch (state) {
 		case "arming":
-			return `\u25cf ${backend}: connecting\u2026`;
+			return `\u25cf ${label}: connecting\u2026`;
 		case "recording":
-			return `\u25cf ${backend}: listening`;
+			return `\u25cf ${label}: listening`;
 		case "processing":
-			return `${backend}: transcribing\u2026`;
+			return `transcribing with ${label}\u2026`;
 		case "paused":
-			return `${backend}: paused after repeated failures`;
+			return `${label}: paused after repeated failures`;
 		default:
-			return undefined;
+			// Shown while idle too, so the active backend is discoverable without
+			// starting a recording.
+			return label;
 	}
 }

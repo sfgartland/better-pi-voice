@@ -8,7 +8,7 @@
  */
 
 import { readFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { CorrectionMode } from "./keyterms/correct.ts";
@@ -76,6 +76,17 @@ export const DEFAULT_SETTINGS: VoiceSettings = {
 
 export function settingsPath(): string {
 	return join(getAgentDir(), SETTINGS_FILENAME);
+}
+
+/**
+ * Persist settings.
+ *
+ * Writes the fully merged object, so the file ends up self-documenting at the
+ * cost of no longer looking like the minimal file a user hand-wrote. Unknown
+ * fields are not preserved, which is the trade for not carrying a schema.
+ */
+export async function writeSettings(settings: VoiceSettings): Promise<void> {
+	await writeFile(settingsPath(), `${JSON.stringify(settings, null, "\t")}\n`, "utf8");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

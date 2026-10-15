@@ -121,20 +121,29 @@ describe("EditorSink", () => {
 });
 
 describe("statusText", () => {
-	test("says what is happening for every state", () => {
+	test("names the backend and model in every state", () => {
+		const label = "deepgram nova-3";
 		for (const state of ["idle", "arming", "recording", "processing", "paused"] as const) {
-			const text = statusText(state, "deepgram");
-			if (state === "idle") expect(text).toBeUndefined();
-			else expect(text).toContain("deepgram");
+			expect(statusText(state, label)).toContain(label);
 		}
 	});
 
-	test("names the backend so two installs are distinguishable", () => {
-		expect(statusText("recording", "parakeet")).toContain("parakeet");
+	test("is quiet apart from the label while idle", () => {
+		expect(statusText("idle", "deepgram nova-3")).toBe("deepgram nova-3");
+	});
+
+	test("says what is happening while recording and transcribing", () => {
+		expect(statusText("recording", "deepgram nova-3")).toContain("listening");
+		expect(statusText("processing", "deepgram nova-3")).toContain("transcribing with");
+	});
+
+	test("distinguishes the two backends", () => {
+		expect(statusText("recording", "parakeet parakeet-unified-en-0.6b")).toContain("parakeet");
+		expect(statusText("recording", "parakeet parakeet-unified-en-0.6b")).not.toContain("deepgram");
 	});
 
 	test("explains a tripped breaker", () => {
-		expect(statusText("paused", "deepgram")).toContain("paused");
+		expect(statusText("paused", "deepgram nova-3")).toContain("paused");
 	});
 });
 

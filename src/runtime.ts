@@ -22,6 +22,8 @@ export type Runtime = {
 	toggle(): void;
 	dispose(): void;
 	get state(): VoiceState;
+	/** Backend and model, for status and for /voice. */
+	readonly label: string;
 };
 
 type Logger = { debug(message: string): void; notify(message: string, level?: "info" | "warning" | "error"): void };
@@ -38,6 +40,21 @@ export function createBackend(settings: VoiceSettings): VoiceBackend {
 		endpointingMs: settings.deepgram.endpointingMs,
 		utteranceEndMs: settings.deepgram.utteranceEndMs,
 	});
+}
+
+/**
+ * What to call the active backend, including which model it will use. Shown in
+ * the status line and by /voice, because "which one is listening?" is the first
+ * question when a transcript comes back wrong.
+ */
+export function backendLabel(settings: VoiceSettings): string {
+	if (settings.backend === "parakeet") {
+		const stem = settings.parakeet.modelPath
+			? basename(settings.parakeet.modelPath).replace(/\.gguf$/i, "")
+			: "pi-voice's model";
+		return `parakeet ${stem}`;
+	}
+	return `deepgram ${settings.deepgram.model}`;
 }
 
 /** The repository name, which is often the single most useful keyterm. */
@@ -67,6 +84,7 @@ export async function createRuntime(
 	};
 
 	const backend = createBackend(settings);
+	const label = backendLabel(settings);
 	const capture: Capture = new SystemCapture();
 	const editor = new EditorSink({
 		get: () => ctx.ui.getEditorText(),
@@ -108,7 +126,7 @@ export async function createRuntime(
 		keyterms,
 		hooks: {
 			onState: (state) => {
-				ctx.ui.setStatus(STATUS_KEY, statusText(state, settings.backend));
+				ctx.ui.setStatus(STATUS_KEY, statusText(state, label));
 				if (state === "recording" || state === "arming") editor.begin();
 				if (state === "idle" || state === "paused") ctx.ui.setWidget(LEVEL_WIDGET_KEY, undefined);
 			},
@@ -135,6 +153,9 @@ export async function createRuntime(
 	if (!availability.available && availability.reason) {
 		logger.notify(availability.reason, "warning");
 	}
+
+	// Show which backend and model are active before anything is recorded.
+	ctx.ui.setStatus(STATUS_KEY, statusText("idle", label));
 
 	// Hold-to-talk needs key *release*, which only exists in the raw input
 	// stream. Tap mode uses the ordinary shortcut registration instead.
@@ -164,5 +185,6 @@ export async function createRuntime(
 		get state() {
 			return controller.currentState;
 		},
+		label,
 	};
 }
