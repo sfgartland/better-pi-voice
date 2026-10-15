@@ -143,25 +143,60 @@ whether the pass is earning its keep before trusting it.
 If you want true local biasing instead, a whisper-family model with `initialPrompt`
 plus a batch re-pass at finalize is the route; it is not implemented here.
 
-**It is also slower than real time on this machine.** With the CPU fallback (the
-bundled `linux-x64-cpu-vulkan` build cannot open this GPU — the driver reports
-`VK_ERROR_INCOMPATIBLE_DRIVER`), 6.65 s of speech took ~12.5 s to transcribe, about
-0.5× real time. Transcripts therefore arrive *after* you stop speaking rather than
-while you speak. Treat the local backend as the private/offline option, not the fast
-one, until it is running on a usable compute backend.
+**It is also the slow part on this machine.** Measured on an 8-core x86_64 laptop
+with the bundled `linux-x64-cpu-vulkan` build (which cannot open the GPU here — the
+driver reports `VK_ERROR_INCOMPATIBLE_DRIVER`, so this is the CPU path):
+
+| | measured |
+|---|---|
+| first model load (698 MB, cold page cache) | ~2.7 s |
+| warm reload (file already cached) | ~0.4 s |
+| **streaming decode** | **~0.9× real-time — only just keeps up** |
+| **batch** transcribe of the same audio | **3.5× real-time** |
+| first interim out of the stream | ~0.6 s |
+
+So live streaming works, but without headroom: the decoder consumes audio about as
+fast as you speak it, and text drifts further behind over a long utterance. The batch
+path is nearly four times faster, which is why a record-then-transcribe mode is worth
+considering (see below). Treat the local backend as the private/offline option rather
+than the fast one until it is running on usable compute.
+
+### Which local models can stream
+
+`transcribe-cpp` ships 27 models; only these four can do live dictation at all:
+
+| model | size | languages |
+|---|---|---|
+| `parakeet-unified-en-0.6b` | 731 MB | English |
+| `multitalker-parakeet-streaming-0.6b-v1` | 734 MB | English |
+| `nemotron-3.5-asr-streaming-0.6b` | 751 MB | 32 languages |
+| `Voxtral-Mini-4B-Realtime-2602` | 4.7 GB | 13 languages |
+
+There is **no streaming model lighter than parakeet-0.6b**. The genuinely small ones —
+`medasr` (128 MB), `parakeet-tdt_ctc-110m` (135 MB), `canary-180m-flash` (218 MB),
+`SenseVoiceSmall` (253 MB), `whisper-small` (270 MB) — are all batch-only, so using one
+means giving up live text and transcribing after you release the key. With batch running
+at 3.5× real-time that is a reasonable trade, and the pipeline already retains the whole
+utterance, but it is not implemented yet.
+
+For non-English dictation, `nemotron-3.5-asr-streaming-0.6b` is the only streaming option
+that is not parakeet, at the same size.
 
 ### Keeping the model loaded
 
-Loading the GGUF is slow enough that unloading it the moment a recording ends would be
-felt on the next one, so the model stays resident after a session and is released when
-either of these happens first:
+The model is **released after every recording by default**, because a warm reload is only
+about 0.4 s and holding ~700 MB between recordings is not a good trade on a laptop. Set
+`parakeet.idleUnloadMs` to keep it resident instead — useful for larger models, where a
+reload costs real time. When residency is on, the model is released by whichever of these
+happens first:
 
-- **15 minutes** pass with no recording (`parakeet.idleUnloadMs`)
+- the idle window expires (`parakeet.idleUnloadMs`)
 - the machine gets busy — one-minute load average per CPU reaching **0.8**
   (`parakeet.loadShedRatio`), checked once a minute
 
-A new recording cancels a pending release, and `idleUnloadMs: 0` releases immediately.
-The model is also released on session shutdown.
+A new recording cancels a pending release, and session shutdown releases immediately.
+Note that the load-shedding half only matters while residency is on: at the default of 0
+the memory is already back after each recording, so there is nothing to shed.
 
 ## Settings
 
@@ -184,8 +219,8 @@ malformed falls back to a default and warns rather than breaking the microphone.
   },
   "parakeet": {
     "modelPath": null,                // null = read pi-voice's config if present
-    "idleUnloadMs": 900000,           // keep the model resident after a recording
-    "loadShedRatio": 0.8              // release early once load per CPU reaches this
+    "idleUnloadMs": 0,                // 0 = release after each recording (see above)
+    "loadShedRatio": 0.8              // with residency on, release early once load per CPU reaches this
   },
   "keyterms": {
     "enabled": true,

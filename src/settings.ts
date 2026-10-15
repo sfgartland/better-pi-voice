@@ -66,7 +66,10 @@ export const DEFAULT_SETTINGS: VoiceSettings = {
 	},
 	parakeet: {
 		modelPath: null,
-		idleUnloadMs: 15 * 60_000,
+		// Load is fast enough on the machines this was built for (about 0.4s
+		// warm) that holding ~700MB between recordings is not worth it. The
+		// residency machinery below stays for larger models and other hardware.
+		idleUnloadMs: 0,
 		loadShedRatio: 0.8,
 	},
 	keyterms: {

@@ -160,8 +160,16 @@ export async function resolveParakeetModelPath(explicit: string | null): Promise
 	return undefined;
 }
 
-/** Loaded models are held for this long after the last session ends. */
-export const DEFAULT_IDLE_UNLOAD_MS = 15 * 60_000;
+/**
+ * Loaded models are held for this long after the last session ends.
+ *
+ * Zero by default: a warm reload measures about 0.4s for the model this was
+ * built for, which is cheaper than holding several hundred megabytes between
+ * recordings. Raise it for larger models, where a reload costs enough to be
+ * worth the memory. `DEFAULT_LOAD_SHED_RATIO` only has anything to do while
+ * this is non-zero, because at zero the memory is already back.
+ */
+export const DEFAULT_IDLE_UNLOAD_MS = 0;
 /** How often to check whether the machine has become busy while idle. */
 export const DEFAULT_LOAD_CHECK_MS = 60_000;
 /** One-minute load average per CPU at which the model is handed back early. */

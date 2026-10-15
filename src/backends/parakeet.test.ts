@@ -82,13 +82,31 @@ describe("model residency", () => {
 	});
 
 	test("reuses the model across recordings instead of reloading it", async () => {
-		const { backend, loads } = makeBackend();
+		// The residency path. The shipped default is 0; see below.
+		const { backend, loads } = makeBackend({ idleUnloadMs: 15 * 60_000 });
 
 		await record(backend);
 		await record(backend);
 		await record(backend);
 
 		expect(loads()).toBe(1);
+	});
+
+	test("releases the model after every recording by default", async () => {
+		// The shipped default trades a warm reload (measured at ~0.4s) for not
+		// holding several hundred megabytes between recordings.
+		const { backend, loads, fake } = makeBackend();
+
+		await record(backend);
+		expect(backend.modelLoaded).toBe(false);
+		expect(fake.wasDisposed()).toBe(true);
+
+		await record(backend);
+		expect(loads()).toBe(2);
+	});
+
+	test("the built-in default keeps nothing resident", () => {
+		expect(DEFAULT_IDLE_UNLOAD_MS).toBe(0);
 	});
 
 	test("a new recording cancels a pending unload", async () => {
