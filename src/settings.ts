@@ -7,9 +7,10 @@
  * settings file should not make the microphone stop working.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { CorrectionMode } from "./keyterms/correct.ts";
 
@@ -306,24 +307,41 @@ export const SETTABLE_KEYS = [
 ] as const;
 export type SettableKey = (typeof SETTABLE_KEYS)[number];
 
-/** The warning name `parseSettings` uses for each settable key. */
-const FIELD_FOR_KEY: Record<SettableKey, string> = {
-	backend: "backend",
-	mode: "mode",
-	model: "parakeet.modelPath",
-	language: "language",
-	correction: "correction",
-	submitOnStop: "submitOnStop",
-	chunkSeconds: "parakeet.chunkSeconds",
-	silenceLevel: "parakeet.silenceLevel",
-	shortcut: "shortcut",
-};
+/** The warning name `parseSettings` uses for each settable key. A Map, not an
+ * object literal: `applySetting` takes arbitrary user input, and inherited
+ * members like `toString` must not resolve to a field name. */
+const FIELD_FOR_KEY = new Map<SettableKey, string>([
+	["backend", "backend"],
+	["mode", "mode"],
+	["model", "parakeet.modelPath"],
+	["language", "language"],
+	["correction", "correction"],
+	["submitOnStop", "submitOnStop"],
+	["chunkSeconds", "parakeet.chunkSeconds"],
+	["silenceLevel", "parakeet.silenceLevel"],
+	["shortcut", "shortcut"],
+]);
 
 function parseBooleanText(value: string): boolean | undefined {
 	const text = value.trim().toLowerCase();
 	if (["true", "1", "on", "yes"].includes(text)) return true;
 	if (["false", "0", "off", "no"].includes(text)) return false;
 	return undefined;
+}
+
+/** Expand `~`, make absolute, and require a file that is actually a GGUF. */
+function resolveModelFile(value: string): { path: string } | { error: string } {
+	const expanded = value.startsWith("~/") ? join(homedir(), value.slice(2)) : value;
+	const absolute = resolve(expanded);
+	let isFile = false;
+	try {
+		isFile = statSync(absolute).isFile();
+	} catch {
+		isFile = false;
+	}
+	if (!isFile) return { error: `No file at ${value}.` };
+	if (!/\.gguf$/i.test(absolute)) return { error: `${value} is not a .gguf model file.` };
+	return { path: absolute };
 }
 
 /** Coerce one typed-by-the-user value onto the object, or name why it cannot be. */
@@ -333,8 +351,12 @@ function withSetting(settings: VoiceSettings, key: SettableKey, value: string): 
 			return { ...settings, backend: value as VoiceSettings["backend"] };
 		case "mode":
 			return { ...settings, mode: value as VoiceSettings["mode"] };
-		case "model":
-			return { ...settings, parakeet: { ...settings.parakeet, modelPath: value } };
+		case "model": {
+			const model = resolveModelFile(value);
+			return "error" in model
+				? model.error
+				: { ...settings, parakeet: { ...settings.parakeet, modelPath: model.path } };
+		}
 		case "language":
 			return { ...settings, language: value };
 		case "correction":
@@ -360,6 +382,8 @@ function withSetting(settings: VoiceSettings, key: SettableKey, value: string): 
 				? `silenceLevel must be a number >= 0 or "auto".`
 				: { ...settings, parakeet: { ...settings.parakeet, silenceLevel: parsed } };
 		}
+		default:
+			return `Unknown setting "${key}".`;
 	}
 }
 
@@ -376,7 +400,7 @@ export function applySetting(
 	key: string,
 	value: string,
 ): { settings: VoiceSettings } | { error: string } {
-	const field = FIELD_FOR_KEY[key as SettableKey];
+	const field = FIELD_FOR_KEY.get(key as SettableKey);
 	if (!field) return { error: `Unknown setting "${key}". Try: ${SETTABLE_KEYS.join(", ")}.` };
 
 	const mutated = withSetting(settings, key as SettableKey, value);

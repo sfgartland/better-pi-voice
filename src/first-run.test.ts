@@ -18,6 +18,7 @@ beforeEach(() => {
 	rmSync(settingsPath(), { force: true });
 	rmSync(HUB, { recursive: true, force: true });
 	delete process.env.DEEPGRAM_API_KEY;
+	delete process.env.HF_HOME;
 });
 
 function addCachedModel(repo: string, file: string): string {
@@ -45,6 +46,20 @@ describe("availableModels", () => {
 	test("is empty when there is no cache at all", async () => {
 		expect(await availableModels()).toEqual([]);
 	});
+
+	test("HF_HOME wins over XDG_CACHE_HOME", async () => {
+		const hfHome = join(root, "hf-home");
+		const dir = join(hfHome, "hub", "models--test--canary-180m-flash-gguf", "snapshots", "abc123");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "canary-180m-flash-Q8_0.gguf"), "x");
+		// This one is in the XDG cache and must be ignored while HF_HOME is set.
+		addCachedModel("parakeet-tdt_ctc-110m-gguf", "parakeet-tdt_ctc-110m-Q8_0.gguf");
+		process.env.HF_HOME = hfHome;
+
+		const models = await availableModels();
+
+		expect(models.map((model) => model.label)).toEqual(["canary-180m-flash-Q8_0"]);
+	});
 });
 
 describe("pickBestModel", () => {
@@ -58,13 +73,22 @@ describe("pickBestModel", () => {
 		expect(pickBestModel(models)?.label).toBe("parakeet-tdt_ctc-110m-Q8_0");
 	});
 
-	test("falls back to the first model when none is known", () => {
+	test("ignores GGUFs that are not speech models", () => {
 		const models = [
 			{ label: "some-other-model-Q8_0", path: "/x" },
 			{ label: "another-model-Q8_0", path: "/y" },
 		];
 
-		expect(pickBestModel(models)?.label).toBe("some-other-model-Q8_0");
+		expect(pickBestModel(models)).toBeUndefined();
+	});
+
+	test("falls back to another speech model when the known ones are absent", () => {
+		const models = [
+			{ label: "some-other-model-Q8_0", path: "/x" },
+			{ label: "whisper-small-Q8_0", path: "/y" },
+		];
+
+		expect(pickBestModel(models)?.label).toBe("whisper-small-Q8_0");
 	});
 
 	test("has nothing to pick from an empty list", () => {

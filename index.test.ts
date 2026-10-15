@@ -7,7 +7,7 @@ import { createFakeCtx, createFakePi, isolateAgentDir } from "./test-support/fak
 // Must run before the extension module is imported: it resolves its settings
 // path at load time.
 const { root } = isolateAgentDir("better-pi-voice");
-const { DEFAULT_SETTINGS, readSettings, writeSettings } = await import("./src/settings.ts");
+const { DEFAULT_SETTINGS, readSettings, settingsPath, writeSettings } = await import("./src/settings.ts");
 const { default: factory } = await import("./index.ts");
 
 // Stand in for a configured install, so backend labels name a real model.
@@ -19,7 +19,7 @@ await writeSettings({
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
 /** The fake command context, extended with the bits only voice needs. */
-function makeCtx(options: { select?: string[] } = {}) {
+function makeCtx(options: { select?: string[]; hasUI?: boolean } = {}) {
 	const base = createFakeCtx(options);
 	let reloaded = 0;
 	const editor = { text: "" };
@@ -59,6 +59,7 @@ function addCachedModel(repo: string, file: string): string {
 // Each test starts from the same configured install, so order cannot leak state.
 beforeEach(async () => {
 	rmSync(HUB, { recursive: true, force: true });
+	delete process.env.DEEPGRAM_API_KEY;
 	await writeSettings({
 		...DEFAULT_SETTINGS,
 		parakeet: { ...DEFAULT_SETTINGS.parakeet, modelPath: "/models/parakeet-unified-en-0.6b-Q8_0.gguf" },
@@ -256,6 +257,42 @@ describe("/voice set", () => {
 		expect(reloads()).toBe(0);
 	});
 
+	test("rejects a key inherited from Object.prototype instead of resetting settings", async () => {
+		const pi = await load();
+		const { ctx, notifications, reloads } = makeCtx();
+
+		await pi.run("voice", "set toString x", ctx);
+
+		expect(notifications[0]!.message).toContain("Unknown setting");
+		expect((await readSettings()).settings.backend).toBe("deepgram");
+		expect((await readSettings()).settings.parakeet.chunkSeconds).toBe(30);
+		expect(reloads()).toBe(0);
+	});
+
+	test("rejects a model path that does not exist", async () => {
+		const pi = await load();
+		const { ctx, notifications, reloads } = makeCtx();
+
+		await pi.run("voice", "set model /nope/missing.gguf", ctx);
+
+		expect(notifications[0]!.message).toContain("No file");
+		expect((await readSettings()).settings.parakeet.modelPath).toBe("/models/parakeet-unified-en-0.6b-Q8_0.gguf");
+		expect(reloads()).toBe(0);
+	});
+
+	test("accepts an existing model file for `set model`", async () => {
+		const file = join(tmpdir(), `better-pi-voice-setmodel-${String(process.pid)}.gguf`);
+		writeFileSync(file, "not a real model");
+		const pi = await load();
+		const { ctx, reloads } = makeCtx();
+
+		await pi.run("voice", `set model ${file}`, ctx);
+
+		expect((await readSettings()).settings.parakeet.modelPath).toBe(file);
+		expect(reloads()).toBe(1);
+		rmSync(file, { force: true });
+	});
+
 	test("a bare /voice set explains the keys instead of throwing", async () => {
 		const pi = await load();
 		const { ctx, notifications } = makeCtx();
@@ -316,6 +353,18 @@ describe("/voice model", () => {
 		expect(reloads()).toBe(0);
 	});
 
+	test("without a UI it lists the models instead of prompting", async () => {
+		addCachedModel("parakeet-tdt_ctc-110m-gguf", "parakeet-tdt_ctc-110m-Q8_0.gguf");
+		const pi = await load();
+		const { ctx, notifications, reloads } = makeCtx({ hasUI: false });
+
+		await pi.run("voice", "model", ctx);
+
+		expect(notifications[0]!.message).toContain("Pass a path explicitly");
+		expect(notifications[0]!.message).toContain("parakeet-tdt_ctc-110m");
+		expect(reloads()).toBe(0);
+	});
+
 	test("says so when no model is on disk", async () => {
 		const pi = await load();
 		const { ctx, notifications, reloads } = makeCtx();
@@ -324,5 +373,32 @@ describe("/voice model", () => {
 
 		expect(notifications[0]!.message).toContain("No Parakeet models");
 		expect(reloads()).toBe(0);
+	});
+});
+
+describe("first run", () => {
+	test("configures itself and tells the user which key to hold", async () => {
+		rmSync(settingsPath(), { force: true });
+		process.env.DEEPGRAM_API_KEY = "test-key";
+		const pi = await load();
+		const { ctx, notifications } = makeCtx();
+
+		await pi.emit("session_start", {}, ctx);
+
+		expect(notifications[0]!.message).toContain("Deepgram");
+		expect(notifications[0]!.message).toContain("ctrl+alt+z");
+		expect((await readSettings()).settings.backend).toBe("deepgram");
+	});
+
+	test("writes nothing and warns when nothing is usable", async () => {
+		rmSync(settingsPath(), { force: true });
+		const pi = await load();
+		const { ctx, notifications } = makeCtx();
+
+		await pi.emit("session_start", {}, ctx);
+
+		expect(notifications[0]!.message).toContain("not configured");
+		expect(notifications[0]!.type).toBe("warning");
+		expect(await Bun.file(settingsPath()).exists()).toBe(false);
 	});
 });

@@ -34,13 +34,21 @@ const MODEL_PREFERENCE = [
 	"parakeet-unified-en-0.6b",
 ];
 
+/**
+ * Families that are actually speech recognisers. The auto-pick must never
+ * choose an unrelated GGUF (a local LLM, an image model) just because it is
+ * the only file in the cache: a written configuration that cannot transcribe
+ * is worse than none.
+ */
+const ASR_FAMILIES = ["parakeet", "canary", "sensevoice", "nemotron", "whisper", "wav2vec", "moonshine"];
+
 /** The model to configure out of the box, chosen from what is already on disk. */
 export function pickBestModel(models: AvailableModel[]): AvailableModel | undefined {
 	for (const preferred of MODEL_PREFERENCE) {
 		const match = models.find((model) => model.label.toLowerCase().includes(preferred));
 		if (match) return match;
 	}
-	return models[0];
+	return models.find((model) => ASR_FAMILIES.some((family) => model.label.toLowerCase().includes(family)));
 }
 
 export type FirstRunOutcome =

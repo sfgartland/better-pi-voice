@@ -19,6 +19,9 @@ export function isolateAgentDir(prefix: string): { root: string; agentDir: strin
 	const cacheHome = join(root, "cache");
 	process.env.PI_CODING_AGENT_DIR = agentDir;
 	process.env.XDG_CACHE_HOME = cacheHome;
+	// The extension gives HF_HOME precedence over XDG_CACHE_HOME, so an exported
+	// value would make the isolated cache a lie.
+	delete process.env.HF_HOME;
 	return { root, agentDir, cacheDir: join(cacheHome, "pi") };
 }
 
@@ -123,6 +126,7 @@ export function createRefreshContext(overrides: Partial<RefreshModelsContext> = 
 export interface FakeCtxOptions {
 	select?: string[];
 	input?: string[];
+	hasUI?: boolean;
 	model?: { provider?: string; id?: string };
 	sessionEntries?: unknown[];
 	registryModels?: unknown[];
@@ -139,7 +143,7 @@ export function createFakeCtx(options: FakeCtxOptions = {}) {
 		cwd: process.cwd(),
 		model: options.model,
 		signal: undefined,
-		hasUI: true,
+		hasUI: options.hasUI ?? true,
 		sessionManager: { getEntries: () => options.sessionEntries ?? [] },
 		modelRegistry: {
 			refresh: async (opts: unknown) => {

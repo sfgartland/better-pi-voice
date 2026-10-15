@@ -1,5 +1,12 @@
 # Handoff — `better-pi-voice` (streaming voice input for pi)
 
+> **Update (later session):** the project has been extracted out of the
+> `pi-extensions` monorepo into its own repository,
+> `~/programing_linux/better-pi-voice`, package `@sfgartland/better-pi-voice`.
+> The two items §3 left open — `/voice set` + `/voice model`, and first-run
+> setup — are now implemented there with tests. §6's questions still need a
+> microphone and are the same open questions.
+
 **Date:** 2026-10-15 · **Written by:** the session that built it
 **Package:** `packages/add/pi-add-better-pi-voice` in `~/programing_linux/pi-extensions`
 **Read first:** [`docs/superpowers/specs/2026-10-15-pi-voice-input-design.md`](superpowers/specs/2026-10-15-pi-voice-input-design.md)

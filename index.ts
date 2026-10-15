@@ -5,7 +5,6 @@
  * cheap and a broken voice setup cannot stop pi from starting.
  */
 
-import { existsSync } from "node:fs";
 import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { KeyId } from "@earendil-works/pi-tui";
@@ -135,12 +134,7 @@ export default async function betterPiVoice(pi: ExtensionAPI): Promise<void> {
 			if (action === "model") {
 				const { settings: current } = await readSettings();
 				let target = value;
-				if (target) {
-					if (!existsSync(target)) {
-						ctx.ui.notify(`No file at ${target}.`, "warning");
-						return;
-					}
-				} else {
+				if (!target) {
 					const models = await availableModels();
 					if (models.length === 0) {
 						ctx.ui.notify(
@@ -164,9 +158,20 @@ export default async function betterPiVoice(pi: ExtensionAPI): Promise<void> {
 					target = models.find((model) => model.label === chosen)?.path ?? "";
 				}
 				if (!target) return;
-				const next = { ...current, parakeet: { ...current.parakeet, modelPath: target } };
-				await writeSettings(next);
-				ctx.ui.notify(`Parakeet model set to ${basename(target)}. Reloading…`, "info");
+				// Both the explicit path and the picker go through the same validation,
+				// so a dangling path cannot be written by either route.
+				const result = applySetting(current, "model", target);
+				if ("error" in result) {
+					ctx.ui.notify(result.error, "warning");
+					return;
+				}
+				await writeSettings(result.settings);
+				const stored = result.settings.parakeet.modelPath ?? target;
+				const backendNote =
+					result.settings.backend === "parakeet"
+						? ""
+						: " The backend is still deepgram; /voice backend parakeet to use it.";
+				ctx.ui.notify(`Parakeet model set to ${basename(stored)}.${backendNote} Reloading…`, "info");
 				await ctx.reload();
 				return;
 			}
