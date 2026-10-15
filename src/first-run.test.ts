@@ -1,5 +1,5 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isolateAgentDir } from "../test-support/fake-pi.ts";
 
@@ -44,6 +44,14 @@ describe("availableModels", () => {
 	});
 
 	test("is empty when there is no cache at all", async () => {
+		expect(await availableModels()).toEqual([]);
+	});
+
+	test("ignores a symlink whose target is missing", async () => {
+		const dir = join(HUB, "models--test--parakeet-tdt_ctc-110m-gguf", "snapshots", "abc123");
+		mkdirSync(dir, { recursive: true });
+		symlinkSync(join(dir, "missing.gguf"), join(dir, "parakeet-tdt_ctc-110m-Q8_0.gguf"));
+
 		expect(await availableModels()).toEqual([]);
 	});
 

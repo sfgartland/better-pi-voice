@@ -16,8 +16,8 @@ import type { Capture, CaptureSession } from "./capture.ts";
 import { type Clock, systemClock, type TimerHandle } from "./clock.ts";
 import { AUDIO_SIGNAL_THRESHOLD, AudioRecorder, FrameCoalescer, LevelRing, levelFromS16le } from "./formats.ts";
 import { type CorrectionMode, correctTranscript } from "./keyterms/correct.ts";
-import type { FinalizeOutcome, VoiceBackend, VoiceEvent, VoiceStream } from "./types.ts";
 import type { KeytermSet } from "./keyterms/index.ts";
+import type { FinalizeOutcome, VoiceBackend, VoiceEvent, VoiceStream } from "./types.ts";
 
 export type VoiceState = "idle" | "arming" | "recording" | "processing" | "paused";
 
@@ -93,7 +93,6 @@ export class VoiceController {
 	private transcript = "";
 	/** Latest interim that no final has superseded yet. */
 	private pendingInterim = "";
-	private keytermsUsed: string[] = [];
 	/** Vocabulary the correction pass may repair toward (no seed jargon). */
 	private correctionTerms: string[] = [];
 	private hadAudioSignal = false;
@@ -227,7 +226,6 @@ export class VoiceController {
 			this.debug(`keyterm mining failed: ${String(error)}`);
 		}
 		if (generation !== this.generation) return undefined;
-		this.keytermsUsed = set.bias;
 		this.correctionTerms = set.correct;
 
 		const stream = await this.deps.backend.start(
@@ -365,7 +363,6 @@ export class VoiceController {
 	private resetSession(): void {
 		this.transcript = "";
 		this.pendingInterim = "";
-		this.keytermsUsed = [];
 		this.correctionTerms = [];
 		this.hadAudioSignal = false;
 		this.sawTranscript = false;
@@ -423,13 +420,23 @@ export class VoiceController {
 		if (tail) this.feed(stream, tail);
 	}
 
+	private feedPending = 0;
+
 	private feed(stream: VoiceStream, frame: Buffer): void {
 		try {
 			const result = stream.feed(frame);
 			if (result && typeof (result as Promise<void>).catch === "function") {
-				void (result as Promise<void>).catch((error: unknown) => {
-					this.debug(`feed rejected: ${String(error)}`);
-				});
+				this.feedPending++;
+				if (this.feedPending > 4) {
+					this.debug(`feed backlog is ${String(this.feedPending)} frames; transcription is falling behind`);
+				}
+				void (result as Promise<void>)
+					.catch((error: unknown) => {
+						this.debug(`feed rejected: ${String(error)}`);
+					})
+					.finally(() => {
+						this.feedPending--;
+					});
 			}
 		} catch (error) {
 			// The stream may have closed between the check and the write. Dropping

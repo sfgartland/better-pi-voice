@@ -8,12 +8,13 @@
 import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { KeyId } from "@earendil-works/pi-tui";
-import { availableModels } from "./src/backends/parakeet.ts";
+import { availableModels, resolveParakeetModelPath } from "./src/backends/parakeet.ts";
 import { ensureFirstRunSettings } from "./src/first-run.ts";
 import { backendLabel, createRuntime, type Runtime } from "./src/runtime.ts";
 import {
 	applySetting,
 	readSettings,
+	resolveDeepgramApiKey,
 	SETTABLE_KEYS,
 	settingsPath,
 	type VoiceSettings,
@@ -65,13 +66,14 @@ function describe(settings: VoiceSettings, runtime: Runtime | undefined): string
 	];
 	if (settings.backend === "deepgram") {
 		const keyEnv = settings.deepgram.apiKeyEnv;
-		const hasEnv = Boolean(process.env[keyEnv]);
+		const apiKeyFile = settings.deepgram.apiKeyFile;
+		const hasKey = resolveDeepgramApiKey(settings) !== undefined;
 		lines.push(
 			`  api key    ${
-				hasEnv
-					? `set (${keyEnv})`
-					: settings.deepgram.apiKeyFile
-						? `from ${settings.deepgram.apiKeyFile}`
+				hasKey
+					? `set (${keyEnv}${apiKeyFile ? ` or ${apiKeyFile}` : ""})`
+					: apiKeyFile
+						? `MISSING (${keyEnv}; no key in ${apiKeyFile})`
 						: `MISSING (${keyEnv})`
 			}`,
 		);
@@ -91,7 +93,22 @@ export default async function betterPiVoice(pi: ExtensionAPI): Promise<void> {
 		if (disposed) return undefined;
 		if (runtime) return runtime;
 		runtimePromise ??= readSettings().then(({ settings: fresh }) => createRuntime(pi, ctx, fresh, false));
-		runtime = await runtimePromise;
+		let created: Runtime;
+		try {
+			created = await runtimePromise;
+		} catch (error) {
+			// A transient failure must not pin a rejected promise and disable voice for
+			// the rest of the session.
+			runtimePromise = undefined;
+			ctx.ui.notify(`Voice input could not start: ${error instanceof Error ? error.message : String(error)}`, "error");
+			return undefined;
+		}
+		if (disposed) {
+			// session_shutdown won the race; do not install a live runtime.
+			await created.dispose();
+			return undefined;
+		}
+		runtime = created;
 		return runtime;
 	};
 
@@ -120,6 +137,10 @@ export default async function betterPiVoice(pi: ExtensionAPI): Promise<void> {
 				const { settings: current } = await readSettings();
 				if (current.backend === target) {
 					ctx.ui.notify(`Voice backend is already ${target} (${backendLabel(current)}).`, "info");
+					return;
+				}
+				if (target === "parakeet" && !(await resolveParakeetModelPath(current.parakeet.modelPath))) {
+					ctx.ui.notify("No Parakeet model found. Run /voice model to pick one, then switch the backend.", "warning");
 					return;
 				}
 				const next = { ...current, backend: target };
@@ -235,6 +256,8 @@ export default async function betterPiVoice(pi: ExtensionAPI): Promise<void> {
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
+		// A duplicate session_start must not leak the previous runtime.
+		await runtime?.dispose();
 		disposed = false;
 		runtimePromise = undefined;
 		runtime = undefined;

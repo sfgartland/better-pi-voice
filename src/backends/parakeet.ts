@@ -12,7 +12,7 @@
  * and the same interim/final event shape.
  */
 
-import { type Dirent, existsSync } from "node:fs";
+import { type Dirent, existsSync, statSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { cpus, homedir, loadavg } from "node:os";
 import { basename, join } from "node:path";
@@ -140,19 +140,29 @@ async function resolvePackageEntry(packageDir: string): Promise<string | undefin
 /** Weight for how many consecutive stable revisions a prefix needs before committing. */
 const STABLE_PREFIX_AGREEMENT = 3;
 
+/** A usable model is an existing `.gguf` file, not a directory or a dangling link. */
+function isModelFile(path: string): boolean {
+	if (!/\.gguf$/i.test(path)) return false;
+	try {
+		return statSync(path).isFile();
+	} catch {
+		return false;
+	}
+}
+
 /**
  * Where the Parakeet GGUF lives. Explicit setting first, then pi-voice's own
  * configuration (so an existing install keeps working), then nothing.
  */
 export async function resolveParakeetModelPath(explicit: string | null): Promise<string | undefined> {
-	if (explicit && existsSync(explicit)) return explicit;
+	if (explicit && isModelFile(explicit)) return explicit;
 
 	try {
 		const raw = JSON.parse(await readFile(join(getAgentDir(), "pi-voice.json"), "utf8")) as {
 			model?: { path?: unknown };
 		};
 		const path = raw.model?.path;
-		if (typeof path === "string" && existsSync(path)) return path;
+		if (typeof path === "string" && isModelFile(path)) return path;
 	} catch {
 		// pi-voice is not installed or has no settings; that is fine.
 	}
@@ -186,8 +196,9 @@ async function findGgufs(dir: string, depth = 0): Promise<string[]> {
 	for (const entry of entries) {
 		const full = join(dir, entry.name);
 		if (entry.isDirectory()) found.push(...(await findGgufs(full, depth + 1)));
-		// Snapshot files are frequently symlinks into the repo's `blobs/` directory.
-		else if ((entry.isFile() || entry.isSymbolicLink()) && /\.gguf$/i.test(entry.name)) found.push(full);
+		// Snapshot files are frequently symlinks into the repo's `blobs/`, so follow
+		// the link. A dangling link is not a model and must not be offered.
+		else if (isModelFile(full)) found.push(full);
 	}
 	return found;
 }
@@ -483,7 +494,12 @@ class ParakeetBatchStream implements VoiceStream {
 
 	close(): void {
 		this.closed = true;
-		this.notifyReleased();
+		// The queue may still be transcribing; releasing the model now could dispose
+		// it under an in-flight transcribe. Hand it back once the queue settles.
+		void this.queue.then(
+			() => this.notifyReleased(),
+			() => this.notifyReleased(),
+		);
 	}
 
 	private notifyReleased(): void {
@@ -766,11 +782,14 @@ export class ParakeetBackend implements VoiceBackend {
 					'The configured model cannot stream. Set parakeet.mode to "batch" to use it, or choose a streaming model.',
 				code: "no_streaming",
 			});
+			// The model was loaded, so it must be released rather than left resident.
+			this.scheduleIdleUnload();
 			return undefined;
 		}
 
+		let session: CppSession | undefined;
 		try {
-			const session = model.createSession();
+			session = model.createSession();
 			const stream = await session.stream({
 				timestamps: "none",
 				language,
@@ -781,6 +800,9 @@ export class ParakeetBackend implements VoiceBackend {
 			});
 			return new ParakeetStream(stream, session, emit, () => this.scheduleIdleUnload());
 		} catch (error) {
+			// A session that was created but whose stream failed must still be freed.
+			session?.dispose();
+			this.scheduleIdleUnload();
 			emit({
 				type: "error",
 				message: `Could not start the local transcriber: ${String(error)}`,

@@ -11,12 +11,21 @@ const { DEFAULT_SETTINGS, readSettings, settingsPath, writeSettings } = await im
 const { default: factory } = await import("./index.ts");
 
 // Stand in for a configured install, so backend labels name a real model.
+// The file must exist: /voice backend validates the path before switching.
+const baselineModel = join(
+	tmpdir(),
+	`better-pi-voice-baseline-${String(process.pid)}-parakeet-unified-en-0.6b-Q8_0.gguf`,
+);
+writeFileSync(baselineModel, "not a real model");
 await writeSettings({
 	...DEFAULT_SETTINGS,
-	parakeet: { modelPath: "/models/parakeet-unified-en-0.6b-Q8_0.gguf" },
+	parakeet: { modelPath: baselineModel },
 });
 
-afterAll(() => rmSync(root, { recursive: true, force: true }));
+afterAll(() => {
+	rmSync(baselineModel, { force: true });
+	rmSync(root, { recursive: true, force: true });
+});
 
 /** The fake command context, extended with the bits only voice needs. */
 function makeCtx(options: { select?: string[]; hasUI?: boolean } = {}) {
@@ -62,7 +71,7 @@ beforeEach(async () => {
 	delete process.env.DEEPGRAM_API_KEY;
 	await writeSettings({
 		...DEFAULT_SETTINGS,
-		parakeet: { ...DEFAULT_SETTINGS.parakeet, modelPath: "/models/parakeet-unified-en-0.6b-Q8_0.gguf" },
+		parakeet: { ...DEFAULT_SETTINGS.parakeet, modelPath: baselineModel },
 	});
 });
 
@@ -286,7 +295,7 @@ describe("/voice set", () => {
 		await pi.run("voice", "set model /nope/missing.gguf", ctx);
 
 		expect(notifications[0]!.message).toContain("No file");
-		expect((await readSettings()).settings.parakeet.modelPath).toBe("/models/parakeet-unified-en-0.6b-Q8_0.gguf");
+		expect((await readSettings()).settings.parakeet.modelPath).toBe(baselineModel);
 		expect(reloads()).toBe(0);
 	});
 
@@ -355,7 +364,7 @@ describe("/voice model", () => {
 
 		await pi.run("voice", "model /nope/missing.gguf", ctx);
 
-		expect((await readSettings()).settings.parakeet.modelPath).toBe("/models/parakeet-unified-en-0.6b-Q8_0.gguf");
+		expect((await readSettings()).settings.parakeet.modelPath).toBe(baselineModel);
 		expect(notifications[0]!.message).toContain("No file");
 		expect(reloads()).toBe(0);
 	});
@@ -379,7 +388,7 @@ describe("/voice model", () => {
 
 		await pi.run("voice", "model", ctx);
 
-		expect((await readSettings()).settings.parakeet.modelPath).toBe("/models/parakeet-unified-en-0.6b-Q8_0.gguf");
+		expect((await readSettings()).settings.parakeet.modelPath).toBe(baselineModel);
 		expect(notifications).toEqual([]);
 		expect(reloads()).toBe(0);
 	});

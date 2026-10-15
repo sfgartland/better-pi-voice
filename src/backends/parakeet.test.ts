@@ -440,10 +440,120 @@ describe("batch mode", () => {
 			() => {},
 		);
 		stream?.close();
+		// The release is deferred until the batch queue settles.
+		await new Promise((resolve) => setTimeout(resolve, 0));
 
 		expect(backend.modelLoaded).toBe(true);
 		clock.advance(60_000);
 		expect(backend.modelLoaded).toBe(false);
+	});
+});
+
+describe("startup failures", () => {
+	const startOptions = { language: "en", keyterms: [], signal: new AbortController().signal };
+
+	function backendWith(
+		model: unknown,
+		overrides: { idleUnloadMs?: number; clock?: FakeClock; mode?: "batch" | "streaming"; chunkSeconds?: number } = {},
+	): { backend: ParakeetBackend; clock: FakeClock } {
+		const clock = overrides.clock ?? new FakeClock();
+		const backend = new ParakeetBackend({
+			modelPath: modelFile,
+			clock,
+			mode: overrides.mode,
+			chunkSeconds: overrides.chunkSeconds,
+			idleUnloadMs: overrides.idleUnloadMs ?? DEFAULT_IDLE_UNLOAD_MS,
+			loadModel: async () => model as never,
+		});
+		return { backend, clock };
+	}
+
+	test("disposes the session and releases the model when the stream fails to start", async () => {
+		let sessionDisposed = false;
+		let modelDisposed = false;
+		const { backend } = backendWith(
+			{
+				capabilities: { supportsStreaming: true, languages: ["en"], nativeSampleRate: 16_000 },
+				createSession: () => ({
+					stream: async () => {
+						throw new Error("no stream");
+					},
+					dispose: () => {
+						sessionDisposed = true;
+					},
+				}),
+				transcribe: async () => ({ text: "" }),
+				dispose: () => {
+					modelDisposed = true;
+				},
+			},
+			{ mode: "streaming" },
+		);
+		const events: VoiceEvent[] = [];
+
+		const stream = await backend.start(startOptions, (event) => events.push(event));
+
+		expect(stream).toBeUndefined();
+		expect(events).toContainEqual(expect.objectContaining({ type: "error", code: "stream_start_failed" }));
+		expect(sessionDisposed).toBe(true);
+		expect(modelDisposed).toBe(true);
+	});
+
+	test("releases the model when the chosen model cannot stream", async () => {
+		let modelDisposed = false;
+		const { backend } = backendWith(
+			{
+				capabilities: { supportsStreaming: false, languages: ["en"], nativeSampleRate: 16_000 },
+				createSession: () => {
+					throw new Error("batch models have no session");
+				},
+				transcribe: async () => ({ text: "" }),
+				dispose: () => {
+					modelDisposed = true;
+				},
+			},
+			{ mode: "streaming" },
+		);
+
+		const stream = await backend.start(startOptions, () => {});
+
+		expect(stream).toBeUndefined();
+		expect(modelDisposed).toBe(true);
+	});
+
+	test("releases the model only after an in-flight transcribe settles", async () => {
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const clock = new FakeClock();
+		const { backend } = backendWith(
+			{
+				capabilities: { supportsStreaming: false, languages: ["en"], nativeSampleRate: 16_000 },
+				createSession: () => {
+					throw new Error("batch models have no session");
+				},
+				transcribe: async () => {
+					await gate;
+					return { text: "done" };
+				},
+				dispose: () => {},
+			},
+			{ mode: "batch", chunkSeconds: 1, idleUnloadMs: 15 * 60_000, clock },
+		);
+		const stream = await backend.start(startOptions, () => {});
+		if (!stream) throw new Error("batch backend did not start");
+
+		// A pause one second in triggers a cut, so a transcribe is now in flight.
+		for (let i = 0; i < 7; i++) stream.feed(pcmOf(500, 3200));
+		for (let i = 0; i < 3; i++) stream.feed(pcmOf(0, 3200));
+		stream.close();
+
+		// Nothing may be scheduled for release while transcribe is still blocked.
+		expect(clock.pending).toBe(0);
+		release();
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(clock.pending).toBeGreaterThan(0);
 	});
 });
 

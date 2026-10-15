@@ -322,7 +322,7 @@ the session ends.
 ## Development
 
 ```bash
-bun test          # 166 tests, no network or microphone required
+bun test          # no network or microphone required
 bunx tsc --noEmit
 bunx biome check .
 

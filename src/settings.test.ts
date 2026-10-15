@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { DEFAULT_SETTINGS, isValidShortcut, parseDotenv, parseSettings, resolveDeepgramApiKey } from "./settings.ts";
 
 describe("parseSettings", () => {
@@ -124,15 +127,30 @@ describe("resolveDeepgramApiKey", () => {
 	});
 
 	test("falls back to the key file", () => {
+		const dir = mkdtempSync(join(tmpdir(), "better-pi-voice-key-"));
+		const file = join(dir, "keys.env");
+		writeFileSync(file, "deepgram_key=file-key\n");
 		const settings = {
 			...DEFAULT_SETTINGS,
 			deepgram: {
 				...DEFAULT_SETTINGS.deepgram,
 				apiKeyEnv: "DEFINITELY_NOT_SET_KEY",
-				apiKeyFile: "/tmp/vsmoke/deepgram-key-test.env",
+				apiKeyFile: file,
 			},
 		};
-		expect(resolveDeepgramApiKey(settings)).toBe("file-key");
+		try {
+			expect(resolveDeepgramApiKey(settings)).toBe("file-key");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("does not treat a prototype member named by apiKeyEnv as a key", () => {
+		const settings = {
+			...DEFAULT_SETTINGS,
+			deepgram: { ...DEFAULT_SETTINGS.deepgram, apiKeyEnv: "toString", apiKeyFile: null },
+		};
+		expect(resolveDeepgramApiKey(settings)).toBeUndefined();
 	});
 
 	test("returns undefined when neither source exists", () => {

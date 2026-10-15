@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
-	collectKeyterms,
 	collectKeytermSets,
+	collectKeyterms,
 	correctTranscript,
 	DEFAULT_MAX_TERMS,
 	editDistance,

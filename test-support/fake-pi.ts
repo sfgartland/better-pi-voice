@@ -127,6 +127,7 @@ export interface FakeCtxOptions {
 	select?: string[];
 	input?: string[];
 	hasUI?: boolean;
+	mode?: string;
 	model?: { provider?: string; id?: string };
 	sessionEntries?: unknown[];
 	registryModels?: unknown[];
@@ -141,10 +142,14 @@ export function createFakeCtx(options: FakeCtxOptions = {}) {
 	const refreshes: unknown[] = [];
 	const ctx = {
 		cwd: process.cwd(),
+		mode: options.mode,
 		model: options.model,
 		signal: undefined,
 		hasUI: options.hasUI ?? true,
-		sessionManager: { getEntries: () => options.sessionEntries ?? [] },
+		sessionManager: {
+			getEntries: () => options.sessionEntries ?? [],
+			getBranch: () => options.sessionEntries ?? [],
+		},
 		modelRegistry: {
 			refresh: async (opts: unknown) => {
 				refreshes.push(opts);

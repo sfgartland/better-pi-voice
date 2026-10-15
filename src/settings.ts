@@ -363,7 +363,7 @@ function parseBooleanText(value: string): boolean | undefined {
 
 /** Expand `~`, make absolute, and require a file that is actually a GGUF. */
 function resolveModelFile(value: string): { path: string } | { error: string } {
-	const expanded = value.startsWith("~/") ? join(homedir(), value.slice(2)) : value;
+	const expanded = value === "~" ? homedir() : value.startsWith("~/") ? join(homedir(), value.slice(2)) : value;
 	const absolute = resolve(expanded);
 	let isFile = false;
 	try {
@@ -471,8 +471,10 @@ export async function readSettings(): Promise<{ settings: VoiceSettings; warning
  * Never stored in the settings file itself.
  */
 export function resolveDeepgramApiKey(settings: VoiceSettings): string | undefined {
-	const fromEnv = process.env[settings.deepgram.apiKeyEnv];
-	if (fromEnv && fromEnv.trim().length > 0) return fromEnv.trim();
+	const raw = process.env[settings.deepgram.apiKeyEnv];
+	// `process.env` inherits from Object.prototype, so a settings file that names
+	// `toString` or `__proto__` would otherwise yield a function, not a key.
+	if (typeof raw === "string" && raw.trim().length > 0) return raw.trim();
 
 	const file = settings.deepgram.apiKeyFile;
 	if (!file) return undefined;

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { backendLabel } from "./runtime.ts";
+import { createFakeCtx, createFakePi } from "../test-support/fake-pi.ts";
+import { backendLabel, createRuntime } from "./runtime.ts";
 import { DEFAULT_SETTINGS, type VoiceSettings } from "./settings.ts";
 
 function withSettings(overrides: Partial<VoiceSettings>): VoiceSettings {
@@ -40,5 +41,25 @@ describe("backendLabel", () => {
 		});
 		expect(backendLabel(settings)).not.toContain("deepgram");
 		expect(backendLabel(settings)).not.toContain("nova-3");
+	});
+});
+
+describe("createRuntime wiring", () => {
+	// isKittyProtocolActive() is false outside a Kitty terminal, which is the test
+	// environment, so hold mode must fall back to a tap shortcut.
+	test("hold mode registers a tap shortcut when releases are unavailable", async () => {
+		const pi = createFakePi();
+		const { ctx } = createFakeCtx();
+		const runtime = await createRuntime(
+			pi.api,
+			ctx as unknown as Parameters<typeof createRuntime>[1],
+			DEFAULT_SETTINGS,
+			false,
+		);
+
+		expect(pi.shortcuts.size).toBe(1);
+		expect(runtime.state).toBe("idle");
+
+		await runtime.dispose();
 	});
 });

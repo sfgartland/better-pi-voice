@@ -48,7 +48,10 @@ export type VoiceStream = {
 	 *
 	 * May be async: `transcribe-cpp`'s `Stream.feed()` returns a promise and
 	 * borrows the buffer until it resolves, whereas Deepgram just writes to a
-	 * socket. Callers await the result and apply their own backpressure.
+	 * socket. The controller calls this fire-and-forget (it does not await each
+	 * frame), so on a slow decoder audio can queue ahead of transcription; the
+	 * backlog is bounded by the session's in-memory audio cap and the controller
+	 * logs when it grows.
 	 */
 	feed(pcm: Buffer): void | Promise<void>;
 	finalize(): Promise<FinalizeOutcome>;
