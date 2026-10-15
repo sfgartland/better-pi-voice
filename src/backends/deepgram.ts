@@ -249,7 +249,8 @@ class DeepgramStream implements VoiceStream {
 		for (const chunk of this.preOpen) this.send(chunk);
 		this.preOpen = [];
 		this.preOpenBytes = 0;
-		this.keepAlive = this.clock.setTimeout(() => this.sendKeepAlive(), this.keepAliveMs);
+		// No keepalive is needed if we are already finalizing.
+		if (!this.finalized) this.keepAlive = this.clock.setTimeout(() => this.sendKeepAlive(), this.keepAliveMs);
 
 		// A finalize that arrived while connecting can go out now that the buffered
 		// audio has been sent.

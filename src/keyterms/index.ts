@@ -63,7 +63,8 @@ export function collectKeytermSets(options: CollectOptions = {}): KeytermSet {
 	const bias = sanitizeKeyterms(biasOrder, { maxTerms: options.maxTerms });
 	const correct = sanitizeKeyterms([...user, ...mined], { maxTerms: options.maxTerms });
 	const cap = options.maxTerms ?? DEFAULT_MAX_TERMS;
-	return { bias, correct, truncated: bias.length >= cap };
+	// Something was actually dropped, and the budget is what dropped it.
+	return { bias, correct, truncated: bias.length >= cap && biasOrder.length > bias.length };
 }
 
 /**

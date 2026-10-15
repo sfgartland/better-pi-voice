@@ -188,6 +188,7 @@ export async function createRuntime(
 
 	// Hold-to-talk needs key *release*, which only exists in the raw input
 	// stream. Tap mode uses the ordinary shortcut registration instead.
+	let runtimeDisposed = false;
 	let unsubscribeInput: (() => void) | undefined;
 	if (effectiveMode === "hold" && ctx.mode === "tui") {
 		unsubscribeInput = ctx.ui.onTerminalInput((data) => {
@@ -203,10 +204,13 @@ export async function createRuntime(
 		});
 	} else if (fellBackToTap) {
 		// The configured hold mode cannot work on this terminal, so wire the
-		// shortcut itself as a toggle.
+		// shortcut itself as a toggle. It cannot be unregistered, so guard it
+		// against firing after this runtime is disposed.
 		pi.registerShortcut(settings.shortcut as KeyId, {
 			description: "Start or stop voice input",
-			handler: () => controller.press(),
+			handler: () => {
+				if (!runtimeDisposed) controller.press();
+			},
 		});
 		if (!warnedAboutRelease) {
 			warnedAboutRelease = true;
@@ -220,6 +224,7 @@ export async function createRuntime(
 	return {
 		toggle: () => controller.press(),
 		dispose: async () => {
+			runtimeDisposed = true;
 			unsubscribeInput?.();
 			controller.dispose();
 			await backend.dispose?.();

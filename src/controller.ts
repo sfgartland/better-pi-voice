@@ -234,7 +234,8 @@ export class VoiceController {
 		);
 		if (!stream) return undefined;
 		this.stream = stream;
-		this.streamWasConnected = stream.isConnected();
+		// Never clear a flag set by an earlier connection in this session.
+		this.streamWasConnected ||= stream.isConnected();
 		return stream;
 	}
 
@@ -287,6 +288,10 @@ export class VoiceController {
 		} catch (error) {
 			this.debug(`finalize failed: ${String(error)}`);
 			return "timeout";
+		} finally {
+			// The socket may have finished connecting while finalize was waiting; that
+			// still counts for the replay decision.
+			this.noteConnected();
 		}
 	}
 

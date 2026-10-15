@@ -385,6 +385,29 @@ describe("recovery: silent-drop replay", () => {
 		expect(h.finals).toEqual(["from replay"]);
 	});
 
+	test("replays when the socket opens while finalize is waiting", async () => {
+		const h = makeHarness();
+		h.backend.plans = [
+			{
+				connected: false,
+				finalizeOutcome: "timeout",
+				onFinalize: (stream) => {
+					stream.plan.connected = true;
+				},
+			},
+			{ finalOnFinalize: "from replay" },
+		];
+
+		await start(h);
+		h.capture.emit(pcmOf(500, 6400));
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+
+		expect(h.backend.startCount).toBe(2);
+		expect(h.finals).toEqual(["from replay"]);
+	});
+
 	test("replays when the stream closes early", async () => {
 		const h = makeHarness();
 		h.backend.plans = [{ finalizeOutcome: "closed_early" }, { finalOnFinalize: "ok now" }];
