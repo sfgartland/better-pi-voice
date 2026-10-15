@@ -140,6 +140,16 @@ describe("/voice backend", () => {
 		expect(reloads()).toBe(0);
 	});
 
+	test("without a UI it asks for the backend explicitly", async () => {
+		const pi = await load();
+		const { ctx, notifications, reloads } = makeCtx({ hasUI: false });
+
+		await pi.run("voice", "backend", ctx);
+
+		expect(notifications[0]!.message).toContain("Pass a backend explicitly");
+		expect(reloads()).toBe(0);
+	});
+
 	test("rejects an unknown backend without writing settings", async () => {
 		const pi = await load();
 		const { ctx, notifications, reloads } = makeCtx();
@@ -291,6 +301,27 @@ describe("/voice set", () => {
 		expect((await readSettings()).settings.parakeet.modelPath).toBe(file);
 		expect(reloads()).toBe(1);
 		rmSync(file, { force: true });
+	});
+
+	test("rejects a misspelled modifier in the shortcut", async () => {
+		const pi = await load();
+		const { ctx, notifications, reloads } = makeCtx();
+
+		await pi.run("voice", "set shortcut crtl+alt+z", ctx);
+
+		expect(notifications[0]!.message).toContain("shortcut");
+		expect((await readSettings()).settings.shortcut).toBe("ctrl+alt+z");
+		expect(reloads()).toBe(0);
+	});
+
+	test("accepts a valid shortcut", async () => {
+		const pi = await load();
+		const { ctx, reloads } = makeCtx();
+
+		await pi.run("voice", "set shortcut ctrl+shift+v", ctx);
+
+		expect((await readSettings()).settings.shortcut).toBe("ctrl+shift+v");
+		expect(reloads()).toBe(1);
 	});
 
 	test("a bare /voice set explains the keys instead of throwing", async () => {

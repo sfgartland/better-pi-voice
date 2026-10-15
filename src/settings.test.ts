@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { DEFAULT_SETTINGS, parseDotenv, parseSettings, resolveDeepgramApiKey } from "./settings.ts";
+import { DEFAULT_SETTINGS, isValidShortcut, parseDotenv, parseSettings, resolveDeepgramApiKey } from "./settings.ts";
 
 describe("parseSettings", () => {
 	test("falls back to defaults for an empty file", () => {
@@ -64,6 +64,27 @@ describe("parseSettings", () => {
 		const { settings } = parseSettings({ deepgram: { smartFormat: false, endpointingMs: "fast" } });
 		expect(settings.deepgram.smartFormat).toBe(false);
 		expect(settings.deepgram.endpointingMs).toBe(DEFAULT_SETTINGS.deepgram.endpointingMs);
+	});
+
+	test("warns about a shortcut pi-tui could never match", () => {
+		const { settings, warnings } = parseSettings({ shortcut: "crtl+alt+z" });
+
+		expect(settings.shortcut).toBe(DEFAULT_SETTINGS.shortcut);
+		expect(warnings.some((warning) => warning.startsWith("shortcut"))).toBe(true);
+	});
+});
+
+describe("isValidShortcut", () => {
+	test("accepts modifiers, special keys and symbols", () => {
+		for (const key of ["ctrl+alt+z", "esc", "pageUp", "super+k", "ctrl+shift+p", "space", "f11", "`"]) {
+			expect(isValidShortcut(key)).toBe(true);
+		}
+	});
+
+	test("rejects a misspelled, dangling or doubled modifier, and junk", () => {
+		for (const key of ["crtl+alt+z", "ctrl+", "ctrl+ctrl+a", "", "   ", "a+b"]) {
+			expect(isValidShortcut(key)).toBe(false);
+		}
 	});
 });
 

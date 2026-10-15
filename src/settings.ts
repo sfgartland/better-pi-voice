@@ -193,6 +193,38 @@ function pickNullableString(value: unknown, fallback: string | null, field: stri
 	return fallback;
 }
 
+/** Modifiers pi-tui understands, mirroring its unexported key-id parser. */
+const SHORTCUT_MODIFIERS = ["shift", "alt", "ctrl", "super"];
+
+/**
+ * Whether a string is a key identifier pi-tui can match, such as `ctrl+alt+z`.
+ *
+ * pi-tui does not export its key-id parser, so this mirrors it: known modifiers
+ * each used at most once, then a single non-empty base key. A misspelling like
+ * `crtl+alt+z` fails because `crtl` is not a modifier and the leftover contains
+ * `+`. Without this a typo would be written, reported as success, and then
+ * silently match nothing.
+ */
+export function isValidShortcut(value: string): boolean {
+	let key = value.trim().toLowerCase();
+	const seen = new Set<string>();
+	while (true) {
+		const modifier = SHORTCUT_MODIFIERS.find((name) => key.startsWith(`${name}+`));
+		if (!modifier) break;
+		if (seen.has(modifier)) return false;
+		seen.add(modifier);
+		key = key.slice(modifier.length + 1);
+	}
+	return key.length > 0 && (key === "+" || !key.includes("+"));
+}
+
+function pickShortcut(value: unknown, fallback: string, warnings: string[]): string {
+	if (value === undefined) return fallback;
+	if (typeof value === "string" && isValidShortcut(value)) return value.trim();
+	warnings.push(`shortcut must look like "ctrl+alt+z"; using "${fallback}".`);
+	return fallback;
+}
+
 /** Merge a parsed settings file over the defaults, reporting anything unusable. */
 export function parseSettings(raw: unknown): { settings: VoiceSettings; warnings: string[] } {
 	const warnings: string[] = [];
@@ -214,7 +246,7 @@ export function parseSettings(raw: unknown): { settings: VoiceSettings; warnings
 				"backend",
 				warnings,
 			),
-			shortcut: pickString(source.shortcut, DEFAULT_SETTINGS.shortcut, "shortcut", warnings),
+			shortcut: pickShortcut(source.shortcut, DEFAULT_SETTINGS.shortcut, warnings),
 			mode: pickEnum(source.mode, ["hold", "tap"] as const, DEFAULT_SETTINGS.mode, "mode", warnings),
 			language: pickString(source.language, DEFAULT_SETTINGS.language, "language", warnings),
 			deepgram: {
@@ -362,7 +394,8 @@ function withSetting(settings: VoiceSettings, key: SettableKey, value: string): 
 		case "correction":
 			return { ...settings, correction: value as CorrectionMode };
 		case "shortcut":
-			return { ...settings, shortcut: value };
+			// Validated by parseSettings (pickShortcut), like the enum fields.
+			return { ...settings, shortcut: value.trim() };
 		case "submitOnStop": {
 			const parsed = parseBooleanText(value);
 			return parsed === undefined ? "submitOnStop must be true or false." : { ...settings, submitOnStop: parsed };
