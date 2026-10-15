@@ -2,7 +2,9 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pcmOf } from "../testing/fake-capture.ts";
 import { FakeClock } from "../testing/fake-clock.ts";
+import type { VoiceEvent } from "../types.ts";
 import { DEFAULT_IDLE_UNLOAD_MS, DEFAULT_LOAD_SHED_RATIO, defaultSystemLoad, ParakeetBackend } from "./parakeet.ts";
 
 const modelFile = join(tmpdir(), `better-pi-voice-test-${String(process.pid)}.gguf`);
@@ -164,6 +166,199 @@ describe("model residency", () => {
 	test("does not unload a model that was never loaded", async () => {
 		const { backend, clock } = makeBackend();
 		clock.advance(60 * 60_000);
+		expect(backend.modelLoaded).toBe(false);
+	});
+});
+
+describe("batch mode", () => {
+	/** s16le at 16 kHz: 3200 bytes is 100 ms. */
+	const HUNDRED_MS = 3200;
+
+	/** A model that records what it was asked to transcribe. */
+	function recordingModel(texts: string[] = []) {
+		const calls: number[] = [];
+		let index = 0;
+		let failure: Error | undefined;
+		const model = {
+			capabilities: { supportsStreaming: false, languages: ["en"], nativeSampleRate: 16_000 },
+			createSession: () => {
+				throw new Error("batch mode must not open a streaming session");
+			},
+			transcribe: async (pcm: Float32Array) => {
+				if (failure) throw failure;
+				calls.push(pcm.length * 2);
+				return { text: texts[index++] ?? `piece${String(index)}` };
+			},
+			dispose: () => {},
+		};
+		return { model, calls, failWith: (error: Error) => (failure = error) };
+	}
+
+	function makeBatchBackend(options: { chunkSeconds: number; texts?: string[] } = { chunkSeconds: 15 }) {
+		const recorder = recordingModel(options.texts);
+		const events: VoiceEvent[] = [];
+		const backend = new ParakeetBackend({
+			modelPath: modelFile,
+			mode: "batch",
+			chunkSeconds: options.chunkSeconds,
+			loadModel: async () => recorder.model as never,
+			idleUnloadMs: 0,
+		});
+		return { backend, recorder, events, emit: (event: VoiceEvent) => events.push(event) };
+	}
+
+	async function startStream(h: ReturnType<typeof makeBatchBackend>) {
+		const stream = await h.backend.start(
+			{ language: "en", keyterms: [], signal: new AbortController().signal },
+			h.emit,
+		);
+		if (!stream) throw new Error("batch backend did not start");
+		return stream;
+	}
+
+	const loud = pcmOf(500, HUNDRED_MS);
+	const silent = pcmOf(0, HUNDRED_MS);
+
+	/** One second that contains a real pause in its last third, so a cut is legal. */
+	function feedSecondWithPause(stream: { feed(chunk: Buffer): unknown }): void {
+		for (let i = 0; i < 7; i++) stream.feed(loud);
+		for (let i = 0; i < 3; i++) stream.feed(silent);
+	}
+
+	const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+	test("transcribes short audio in one call, at finalize", async () => {
+		const h = makeBatchBackend({ chunkSeconds: 15 });
+		const stream = await startStream(h);
+
+		for (let i = 0; i < 20; i++) stream.feed(loud); // 2 s, well under the window
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(h.recorder.calls).toEqual([]);
+
+		expect(await stream.finalize()).toBe("complete");
+		expect(h.recorder.calls).toEqual([20 * HUNDRED_MS]);
+	});
+
+	test("chunks long audio while still recording, so only the tail is left", async () => {
+		const h = makeBatchBackend({ chunkSeconds: 1, texts: ["first", "second", "third"] });
+		const stream = await startStream(h);
+
+		feedSecondWithPause(stream);
+		await settle();
+
+		// Text arrived before finalize: that is the entire point of chunking.
+		expect(h.recorder.calls.length).toBe(1);
+		expect(h.events.filter((event) => event.type === "final").length).toBe(1);
+
+		feedSecondWithPause(stream);
+		await settle();
+		expect(h.recorder.calls.length).toBe(2);
+
+		await stream.finalize();
+		expect(h.recorder.calls.length).toBe(3);
+	});
+
+	test("cuts at a quiet moment rather than at a fixed offset", async () => {
+		// A 1 s window is 32 000 bytes. Loud for 0.7 s, silent for 0.3 s, then loud.
+		// A fixed cut at 1.0 s would take 32 000 bytes; the quiet seam at 0.8 s is
+		// the better place and is what should be chosen.
+		const h = makeBatchBackend({ chunkSeconds: 1 });
+		const stream = await startStream(h);
+
+		for (let i = 0; i < 7; i++) stream.feed(loud);
+		for (let i = 0; i < 3; i++) stream.feed(silent);
+		for (let i = 0; i < 5; i++) stream.feed(loud);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		expect(h.recorder.calls[0]).toBe(8 * HUNDRED_MS);
+	});
+
+	test("never cuts inside speech, however quiet the moment looks", async () => {
+		// Previously this cut at the quietest boundary, which loses speech: canary
+		// returns nothing for a clip that starts mid-utterance. Silence is required.
+		const h = makeBatchBackend({ chunkSeconds: 1 });
+		const stream = await startStream(h);
+
+		for (let i = 0; i < 6; i++) stream.feed(silent);
+		for (let i = 0; i < 10; i++) stream.feed(loud);
+		await settle();
+		expect(h.recorder.calls).toEqual([]);
+
+		await stream.finalize();
+		expect(h.recorder.calls).toEqual([16 * HUNDRED_MS]);
+	});
+
+	test("chunkSeconds of 0 transcribes everything once, at the end", async () => {
+		const h = makeBatchBackend({ chunkSeconds: 0 });
+		const stream = await startStream(h);
+
+		for (let i = 0; i < 50; i++) stream.feed(loud);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(h.recorder.calls).toEqual([]);
+
+		await stream.finalize();
+		expect(h.recorder.calls).toEqual([50 * HUNDRED_MS]);
+	});
+
+	test("keeps chunk text in order, and emits each piece exactly once", async () => {
+		const all = ["one", "two", "three", "four", "five", "six", "seven", "eight"];
+		const h = makeBatchBackend({ chunkSeconds: 1, texts: all });
+		const stream = await startStream(h);
+
+		for (let i = 0; i < 4; i++) feedSecondWithPause(stream);
+		await stream.finalize();
+
+		const texts = h.events.filter((event) => event.type === "final").map((event) => event.text);
+		// One emission per transcription, in the order the model produced them.
+		expect(texts.length).toBe(h.recorder.calls.length);
+		expect(texts).toEqual(all.slice(0, texts.length));
+		expect(texts.length).toBeGreaterThan(0);
+	});
+
+	test("transcribes unbroken speech in one piece rather than cutting into it", async () => {
+		const h = makeBatchBackend({ chunkSeconds: 1 });
+		const stream = await startStream(h);
+
+		// No pause anywhere, so there is no safe seam and nothing is cut.
+		for (let i = 0; i < 40; i++) stream.feed(loud);
+		await settle();
+		expect(h.recorder.calls).toEqual([]);
+
+		await stream.finalize();
+		expect(h.recorder.calls).toEqual([40 * HUNDRED_MS]);
+	});
+
+	test("reports one error and finishes early when transcription fails", async () => {
+		const h = makeBatchBackend({ chunkSeconds: 1 });
+		h.recorder.failWith(new Error("out of memory"));
+		const stream = await startStream(h);
+
+		for (let i = 0; i < 4; i++) feedSecondWithPause(stream);
+		expect(await stream.finalize()).toBe("closed_early");
+
+		const errors = h.events.filter((event) => event.type === "error");
+		expect(errors.length).toBe(1);
+		expect(errors[0]?.message).toContain("out of memory");
+	});
+
+	test("close releases the model, so residency can start its timer", async () => {
+		const clock = new FakeClock();
+		const recorder = recordingModel();
+		const backend = new ParakeetBackend({
+			modelPath: modelFile,
+			mode: "batch",
+			clock,
+			idleUnloadMs: 60_000,
+			loadModel: async () => recorder.model as never,
+		});
+		const stream = await backend.start(
+			{ language: "en", keyterms: [], signal: new AbortController().signal },
+			() => {},
+		);
+		stream?.close();
+
+		expect(backend.modelLoaded).toBe(true);
+		clock.advance(60_000);
 		expect(backend.modelLoaded).toBe(false);
 	});
 });

@@ -182,6 +182,26 @@ utterance, but it is not implemented yet.
 For non-English dictation, `nemotron-3.5-asr-streaming-0.6b` is the only streaming option
 that is not parakeet, at the same size.
 
+### Batch mode (the default)
+
+`parakeet.mode` chooses how the local backend works, and **`batch` is the default**
+because it is 2–8× faster here and because it is the only option for the small models,
+none of which can stream.
+
+In batch mode the audio is transcribed in pieces while you are still speaking, so only
+the tail is left when you release the key:
+
+- when the buffer reaches `parakeet.chunkSeconds` (default 15), it is cut **at a real
+  pause** and transcribed in the background; that text appears immediately
+- `parakeet.chunkSeconds: 0` disables chunking and transcribes once, at the end
+- a chunk is only cut where the signal is genuinely silent. If speech never pauses,
+  nothing is cut and the whole utterance is transcribed in one piece
+
+That last rule is not fussiness. Cutting mid-utterance loses words outright: canary
+returns an **empty transcript** for any clip that begins mid-sentence, so a chunk cut at
+merely the *quietest* moment silently discarded everything in it. Requiring real silence
+costs tail latency on unbroken speech instead of costing speech.
+
 ### Keeping the model loaded
 
 The model is **released after every recording by default**, because a warm reload is only
@@ -219,6 +239,8 @@ malformed falls back to a default and warns rather than breaking the microphone.
   },
   "parakeet": {
     "modelPath": null,                // null = read pi-voice's config if present
+    "mode": "batch",                  // "batch" (faster, chunked) | "streaming"
+    "chunkSeconds": 15,               // cut at a pause near this length; 0 = only at the end
     "idleUnloadMs": 0,                // 0 = release after each recording (see above)
     "loadShedRatio": 0.8              // with residency on, release early once load per CPU reaches this
   },

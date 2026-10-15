@@ -33,6 +33,8 @@ export function createBackend(settings: VoiceSettings): VoiceBackend {
 		return new ParakeetBackend({
 			modelPath: settings.parakeet.modelPath,
 			language: settings.language,
+			mode: settings.parakeet.mode,
+			chunkSeconds: settings.parakeet.chunkSeconds,
 			idleUnloadMs: settings.parakeet.idleUnloadMs,
 			loadShedRatio: settings.parakeet.loadShedRatio,
 		});
@@ -57,7 +59,7 @@ export function backendLabel(settings: VoiceSettings): string {
 		const stem = settings.parakeet.modelPath
 			? basename(settings.parakeet.modelPath).replace(/\.gguf$/i, "")
 			: "pi-voice's model";
-		return `parakeet ${stem}`;
+		return `parakeet ${stem} (${settings.parakeet.mode})`;
 	}
 	return `deepgram ${settings.deepgram.model}`;
 }

@@ -19,7 +19,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { type Clock, systemClock, type TimerHandle } from "../clock.ts";
-import { float32ToS16le, s16leToFloat32 } from "../formats.ts";
+import { float32ToS16le, levelFromS16le, s16leToFloat32 } from "../formats.ts";
 import type { FinalizeOutcome, StartOptions, VoiceBackend, VoiceEvent, VoiceStream } from "../types.ts";
 
 type StreamText = { full: string; committed: string; tentative: string };
@@ -189,6 +189,13 @@ export type ParakeetBackendOptions = {
 	modelPath: string | null;
 	language?: string | undefined;
 	/**
+	 * "batch" transcribes in pieces (much faster here, and the only option for
+	 * models that cannot stream); "streaming" decodes continuously.
+	 */
+	mode?: "streaming" | "batch" | undefined;
+	/** Batch mode: chunk length while recording. 0 transcribes only at the end. */
+	chunkSeconds?: number | undefined;
+	/**
 	 * Keep the model in memory this long after the last session, because loading
 	 * it is slow enough that unloading immediately would be felt on the next
 	 * recording. Zero unloads as soon as a session ends.
@@ -335,9 +342,177 @@ class ParakeetStream implements VoiceStream {
 	}
 }
 
+/** Chunk length for incremental batch transcription. */
+export const DEFAULT_CHUNK_SECONDS = 15;
+
+/**
+ * Batch transcription, optionally in chunks while the user is still speaking.
+ *
+ * Batch is several times faster than the streaming decoder on this class of
+ * machine, but it only produces text when asked — waiting for the key release
+ * would mean paying for the whole utterance at the end. So completed chunks are
+ * transcribed in the background as they fill, and their text is emitted as it
+ * arrives; only the tail is left to do when recording stops. At 4.4x real time a
+ * 15s chunk costs about 3.4s, so the backlog stays comfortably behind the audio.
+ *
+ * Cuts are made at the quietest chunk boundary near the target length rather
+ * than at a fixed offset, because cutting mid-word costs accuracy at the seam.
+ */
+export type BatchStreamOptions = {
+	/** 0 disables incremental chunks and transcribes everything at finalize. */
+	chunkSeconds: number;
+	transcribe(pcm: Float32Array): Promise<string>;
+	emit(event: VoiceEvent): void;
+	/** Called once when the session ends, so residency can be scheduled. */
+	onReleased?: (() => void) | undefined;
+};
+
+/** 16 kHz mono s16le. */
+const BYTES_PER_MS = 32;
+/** Do not cut before this fraction of the target length. */
+const MIN_CHUNK_FRACTION = 0.7;
+/**
+ * A boundary is only usable if it is actually silent, not merely the quietest
+ * moment available. Cutting inside a word loses speech outright: canary, for
+ * one, returns an EMPTY transcript for any clip that starts mid-utterance, so a
+ * "quietest point" cut silently discards a whole chunk. Continuous speech with
+ * no pause therefore stays in one piece and is transcribed when recording ends.
+ */
+const SILENCE_LEVEL = 0.05;
+
+class ParakeetBatchStream implements VoiceStream {
+	private chunks: Buffer[] = [];
+	private levels: number[] = [];
+	private bytes = 0;
+	private queue: Promise<void> = Promise.resolve();
+	private closed = false;
+	private finalizeStarted = false;
+	private failure: string | undefined;
+	private released = false;
+	private readonly chunkBytes: number;
+
+	constructor(private readonly options: BatchStreamOptions) {
+		this.chunkBytes = Math.round(options.chunkSeconds * 1000 * BYTES_PER_MS);
+	}
+
+	feed(pcm: Buffer): void {
+		if (this.closed || this.finalizeStarted) return;
+		this.chunks.push(Buffer.from(pcm));
+		this.levels.push(levelFromS16le(pcm));
+		this.bytes += pcm.length;
+		if (this.chunkBytes > 0) this.cutIfReady();
+	}
+
+	async finalize(): Promise<FinalizeOutcome> {
+		if (this.finalizeStarted) return "already_closed";
+		this.finalizeStarted = true;
+		const tail = this.takeAll();
+		if (tail) this.enqueue(tail);
+		try {
+			await this.queue;
+		} catch {
+			// enqueue already reported it
+		}
+		this.notifyReleased();
+		return this.failure ? "closed_early" : "complete";
+	}
+
+	close(): void {
+		this.closed = true;
+		this.notifyReleased();
+	}
+
+	private notifyReleased(): void {
+		if (this.released) return;
+		this.released = true;
+		this.options.onReleased?.();
+	}
+
+	isConnected(): boolean {
+		return !this.closed;
+	}
+
+	/**
+	 * Take the quietest boundary that keeps the chunk within the target window,
+	 * but only when that boundary is genuinely silent. Returning without cutting
+	 * is the safe outcome: the buffer keeps growing and is transcribed whole
+	 * later, which costs tail latency instead of costing words.
+	 */
+	private cutIfReady(): void {
+		if (this.bytes < this.chunkBytes) return;
+
+		const minKeep = this.chunkBytes * MIN_CHUNK_FRACTION;
+
+		let cumulative = 0;
+		let bestIndex = -1;
+		let bestLevel = Number.POSITIVE_INFINITY;
+		for (let i = 0; i < this.chunks.length; i++) {
+			cumulative += this.chunks[i]!.length;
+			if (cumulative > this.chunkBytes) break;
+			// The candidate window is the tail of the buffer, measured in bytes. A
+			// count-based window would stop finding anything once the buffer had
+			// outgrown the target, which is exactly the case that needs a cut.
+			if (cumulative < minKeep) continue;
+			const level = this.levels[i]!;
+			if (level < bestLevel) {
+				bestLevel = level;
+				bestIndex = i;
+			}
+		}
+		// No pause to cut at, so do not cut at all.
+		if (bestIndex < 0 || bestLevel > SILENCE_LEVEL) return;
+
+		const taken = this.chunks.slice(0, bestIndex + 1);
+		this.chunks = this.chunks.slice(bestIndex + 1);
+		this.levels = this.levels.slice(bestIndex + 1);
+		for (const chunk of taken) this.bytes -= chunk.length;
+		this.enqueue(taken.length === 1 ? taken[0]! : Buffer.concat(taken));
+	}
+
+	private takeAll(): Buffer | undefined {
+		if (this.bytes === 0) return undefined;
+		const all = this.chunks.length === 1 ? this.chunks[0]! : Buffer.concat(this.chunks);
+		this.chunks = [];
+		this.levels = [];
+		this.bytes = 0;
+		return all;
+	}
+
+	/** Chunks are transcribed one at a time, so their text stays in order. */
+	private enqueue(pcm: Buffer): void {
+		const samples = s16leToFloat32(pcm);
+		this.queue = this.queue
+			.then(async () => {
+				if (this.closed || this.failure) return;
+				const text = (await this.options.transcribe(samples)).trim();
+				if (text && !this.closed) this.options.emit({ type: "final", text });
+			})
+			.catch((error: unknown) => {
+				if (this.failure) return;
+				this.failure = error instanceof Error ? error.message : String(error);
+				this.options.emit({
+					type: "error",
+					message: `Local transcription failed: ${this.failure}`,
+					code: "local_failed",
+				});
+			});
+	}
+}
+
 export class ParakeetBackend implements VoiceBackend {
 	readonly id = "parakeet";
-	readonly capabilities = { streaming: true, biasing: "none" as const, languages: [] };
+	/**
+	 * Whether text can arrive before the recording ends. Batch mode with chunking
+	 * on does produce text while you speak, just in larger pieces.
+	 */
+	get capabilities(): { streaming: boolean; biasing: "none"; languages: string[] } {
+		return {
+			streaming: this.mode === "streaming" || (this.options.chunkSeconds ?? DEFAULT_CHUNK_SECONDS) > 0,
+			biasing: "none",
+			languages: [],
+		};
+	}
+
 	readonly model = "parakeet";
 
 	private resolution: Promise<string | undefined> | undefined;
@@ -348,12 +523,14 @@ export class ParakeetBackend implements VoiceBackend {
 	private readonly idleUnloadMs: number;
 	private readonly loadShedRatio: number;
 	private readonly loadCheckMs: number;
+	private readonly mode: "streaming" | "batch";
 
 	constructor(private readonly options: ParakeetBackendOptions) {
 		this.clock = options.clock ?? systemClock;
 		this.idleUnloadMs = options.idleUnloadMs ?? DEFAULT_IDLE_UNLOAD_MS;
 		this.loadShedRatio = options.loadShedRatio ?? DEFAULT_LOAD_SHED_RATIO;
 		this.loadCheckMs = options.loadCheckMs ?? DEFAULT_LOAD_CHECK_MS;
+		this.mode = options.mode ?? "batch";
 	}
 
 	/** Whether the model is currently resident. Exposed for tests and diagnostics. */
@@ -474,10 +651,24 @@ export class ParakeetBackend implements VoiceBackend {
 			return undefined;
 		}
 
+		const language = options.language || this.options.language || "en";
+
+		if (this.mode === "batch") {
+			// Chunked, so text arrives while the user is still speaking; only the
+			// tail is left to transcribe when the recording stops.
+			return new ParakeetBatchStream({
+				chunkSeconds: this.options.chunkSeconds ?? DEFAULT_CHUNK_SECONDS,
+				emit,
+				onReleased: () => this.scheduleIdleUnload(),
+				transcribe: async (pcm) => (await model.transcribe(pcm, { language, timestamps: "none" })).text,
+			});
+		}
+
 		if (!model.capabilities.supportsStreaming) {
 			emit({
 				type: "error",
-				message: "The configured Parakeet build does not support streaming transcription.",
+				message:
+					'The configured model cannot stream. Set parakeet.mode to "batch" to use it, or choose a streaming model.',
 				code: "no_streaming",
 			});
 			return undefined;
@@ -487,7 +678,7 @@ export class ParakeetBackend implements VoiceBackend {
 			const session = model.createSession();
 			const stream = await session.stream({
 				timestamps: "none",
-				language: options.language || this.options.language || "en",
+				language,
 				// Stable-prefix committing is exactly the append-only discipline the
 				// controller wants, and transcribe-cpp exposes it directly.
 				commitPolicy: "stable_prefix" as const,

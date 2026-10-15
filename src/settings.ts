@@ -35,6 +35,10 @@ export type VoiceSettings = {
 	};
 	parakeet: {
 		modelPath: string | null;
+		/** "batch" transcribes in pieces; "streaming" decodes continuously. */
+		mode: "streaming" | "batch";
+		/** Batch mode: chunk length while recording. 0 waits until the end. */
+		chunkSeconds: number;
 		/** Hold the model in memory this long after the last recording. */
 		idleUnloadMs: number;
 		/** Hand the memory back early once load per CPU reaches this. */
@@ -66,6 +70,11 @@ export const DEFAULT_SETTINGS: VoiceSettings = {
 	},
 	parakeet: {
 		modelPath: null,
+		// Batch is several times faster here, and it is the only option for the
+		// small models, none of which can stream. Chunking means text still
+		// arrives while you speak, in pieces, rather than all at the end.
+		mode: "batch",
+		chunkSeconds: 15,
 		// Load is fast enough on the machines this was built for (about 0.4s
 		// warm) that holding ~700MB between recordings is not worth it. The
 		// residency machinery below stays for larger models and other hardware.
@@ -211,6 +220,19 @@ export function parseSettings(raw: unknown): { settings: VoiceSettings; warnings
 			},
 			parakeet: {
 				modelPath: pickNullableString(parakeet.modelPath, null, "parakeet.modelPath", warnings),
+				mode: pickEnum(
+					parakeet.mode,
+					["streaming", "batch"] as const,
+					DEFAULT_SETTINGS.parakeet.mode,
+					"parakeet.mode",
+					warnings,
+				),
+				chunkSeconds: pickInteger(
+					parakeet.chunkSeconds,
+					DEFAULT_SETTINGS.parakeet.chunkSeconds,
+					"parakeet.chunkSeconds",
+					warnings,
+				),
 				idleUnloadMs: pickInteger(
 					parakeet.idleUnloadMs,
 					DEFAULT_SETTINGS.parakeet.idleUnloadMs,
