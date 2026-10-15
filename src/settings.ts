@@ -80,7 +80,10 @@ export const DEFAULT_SETTINGS: VoiceSettings = {
 		// small models, none of which can stream. Chunking means text still
 		// arrives while you speak, in pieces, rather than all at the end.
 		mode: "batch",
-		chunkSeconds: 15,
+		// A target, not a limit: audio is cut at the first real pause at or after
+		// 70% of this, so short and medium dictation arrives in one piece and only
+		// long speech is chunked.
+		chunkSeconds: 30,
 		// Derived per recording. A fixed number cannot span rooms: one recording
 		// measured here never dropped below 0.05 (music playing) while another
 		// paused around 0.3. Pin a number only to override that.

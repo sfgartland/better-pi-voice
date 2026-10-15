@@ -191,13 +191,17 @@ none of which can stream.
 In batch mode the audio is transcribed in pieces while you are still speaking, so only
 the tail is left when you release the key:
 
-- when the buffer reaches `parakeet.chunkSeconds` (default 15), it is cut **at a real
-  pause** and transcribed in the background; that text appears immediately
+- `parakeet.chunkSeconds` (default 30) is a **target, not a limit**, and only its lower
+  70% matters: the audio is cut at the **first real pause** at or after that point and
+  transcribed in the background. A pause arriving later than the target still triggers a
+  cut, and unbroken speech simply grows a longer chunk
 - `parakeet.chunkSeconds: 0` disables chunking and transcribes once, at the end
 - a chunk is only cut where the signal is quiet enough to be a pause. The threshold is
-  **derived from each recording** (`parakeet.silenceLevel: "auto"`): the noise floor comes
-  from the 10th percentile of the level distribution and speech from the 75th, and a
-  boundary counts as a pause when it falls in the lowest 30% of that range. A fixed number
+  **derived from each recording** (`parakeet.silenceLevel: "auto"`): the noise floor is the
+  second-lowest level in the buffer, speech is the 75th percentile, and a boundary counts
+  as a pause when it falls in the lowest 30% of that range. The floor is a near-minimum
+  rather than a low percentile because pauses are brief — two silent chunks in forty leave
+  a percentile reporting pure speech, while the minimum still finds them. A fixed number
   cannot span rooms — of two real recordings measured here, one never dropped below 0.05
   (music playing) and the other paused around 0.3. Pin a number to override.
 - when the level barely varies there is no pause structure to find, so nothing is cut and

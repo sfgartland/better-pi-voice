@@ -393,7 +393,36 @@ describe("batch mode", () => {
 		for (let i = 0; i < 3; i++) looseStream.feed(noise);
 		for (let i = 0; i < 5; i++) looseStream.feed(loud);
 		await settle();
-		expect(loose.recorder.calls.length).toBe(1);
+		// The window now slides, so the two remaining pause chunks are cut too.
+		expect(loose.recorder.calls.length).toBeGreaterThanOrEqual(1);
+	});
+
+	test("still cuts when the first pause comes after the target length", async () => {
+		// The bug that showed up in live use: the search was anchored to the start
+		// of the buffer and capped at the target, so a pause landing after the target
+		// meant nothing was ever cut and the whole utterance arrived at the end.
+		const h = makeBatchBackend({ chunkSeconds: 1, silenceLevel: "auto" });
+		const stream = await startStream(h);
+
+		for (let i = 0; i < 15; i++) stream.feed(loud); // 1.5s, past the 1.0s target
+		for (let i = 0; i < 3; i++) stream.feed(silent); // the only pause, at 1.5s
+		await settle();
+
+		expect(h.recorder.calls.length).toBe(1);
+		expect(h.recorder.calls[0]).toBe(16 * HUNDRED_MS); // cut after the pause
+	});
+
+	test("chunk length is a target, not a limit", async () => {
+		const h = makeBatchBackend({ chunkSeconds: 1, silenceLevel: "auto" });
+		const stream = await startStream(h);
+
+		// 4s of unbroken speech followed by a pause: the chunk grows to the pause.
+		for (let i = 0; i < 40; i++) stream.feed(loud);
+		for (let i = 0; i < 2; i++) stream.feed(silent);
+		await settle();
+
+		// Cut after the first pause chunk, so the chunk is 4.1s rather than 4.0s.
+		expect(h.recorder.calls[0]).toBe(41 * HUNDRED_MS);
 	});
 
 	test("close releases the model, so residency can start its timer", async () => {

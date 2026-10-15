@@ -460,49 +460,49 @@ class ParakeetBatchStream implements VoiceStream {
 		const levels = this.levels;
 		if (levels.length < 8) return undefined;
 		const sorted = [...levels].sort((a, b) => a - b);
-		const at = (p: number) => sorted[Math.floor(p * (sorted.length - 1))]!;
-		const noise = at(0.1);
-		const speech = at(0.75);
+		// The second-smallest level, not a low percentile: pauses are brief, so a
+		// 10th percentile often IS speech. Two silent chunks in forty still yields a
+		// zero floor here, whereas the percentile reported 1.00 and found no pause
+		// at all. Taking the second rather than the smallest ignores one stray click.
+		const noise = sorted[1]!;
+		const speech = sorted[Math.floor(0.75 * (sorted.length - 1))]!;
 		const range = speech - noise;
 		if (range < MIN_DYNAMIC_RANGE) return undefined;
 		return noise + PAUSE_RANGE_FRACTION * range;
 	}
 
 	/**
-	 * Take the quietest boundary that keeps the chunk within the target window,
-	 * but only when that boundary is genuinely a pause. Returning without cutting
-	 * is the safe outcome: the buffer keeps growing and is transcribed whole
-	 * later, which costs tail latency instead of costing words.
+	 * Cut at the first genuine pause at or after the minimum length.
+	 *
+	 * The search starts at the minimum and runs to the end of what has been
+	 * captured, so the window slides forward. An earlier version searched only the
+	 * span between the minimum and the target length, anchored at the start of the
+	 * buffer: if the first pause fell outside that span, nothing could ever be cut
+	 * again and the whole utterance arrived at the end. Chunk length is therefore
+	 * a target, not a limit, and grows when speech is unbroken.
 	 */
 	private cutIfReady(): void {
-		if (this.bytes < this.chunkBytes) return;
+		const minKeep = this.chunkBytes * MIN_CHUNK_FRACTION;
+		if (this.bytes < minKeep) return;
 		const threshold = this.pauseThreshold();
 		if (threshold === undefined) return;
 
-		const minKeep = this.chunkBytes * MIN_CHUNK_FRACTION;
-
 		let cumulative = 0;
-		let bestIndex = -1;
-		let bestLevel = Number.POSITIVE_INFINITY;
 		for (let i = 0; i < this.chunks.length; i++) {
 			cumulative += this.chunks[i]!.length;
-			if (cumulative > this.chunkBytes) break;
-			// The candidate window is the tail of the buffer, measured in bytes. A
-			// count-based window would stop finding anything once the buffer had
-			// outgrown the target, which is exactly the case that needs a cut.
 			if (cumulative < minKeep) continue;
-			const level = this.levels[i]!;
-			if (level < bestLevel) {
-				bestLevel = level;
-				bestIndex = i;
+			if (this.levels[i]! <= threshold) {
+				this.cutAfter(i);
+				return;
 			}
 		}
-		// No pause to cut at, so do not cut at all.
-		if (bestIndex < 0 || bestLevel > threshold) return;
+	}
 
-		const taken = this.chunks.slice(0, bestIndex + 1);
-		this.chunks = this.chunks.slice(bestIndex + 1);
-		this.levels = this.levels.slice(bestIndex + 1);
+	/** Split the buffer after chunk `index` and transcribe the head. */
+	private cutAfter(index: number): void {
+		const taken = this.chunks.slice(0, index + 1);
+		this.chunks = this.chunks.slice(index + 1);
+		this.levels = this.levels.slice(index + 1);
 		for (const chunk of taken) this.bytes -= chunk.length;
 		this.enqueue(taken.length === 1 ? taken[0]! : Buffer.concat(taken));
 	}
