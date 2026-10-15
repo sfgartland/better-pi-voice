@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
 	collectKeyterms,
+	collectKeytermSets,
 	correctTranscript,
+	DEFAULT_MAX_TERMS,
 	editDistance,
 	estimateKeytermTokens,
 	filePathsFromBranch,
@@ -64,10 +66,20 @@ describe("sanitizeKeyterms", () => {
 	});
 
 	test("stops before the estimated token budget", () => {
-		const many = Array.from({ length: 200 }, (_, i) => `term${String(i).padStart(4, "0")}`);
-		const out = sanitizeKeyterms(many);
-		expect(out.length).toBeGreaterThan(0);
+		// 20-char terms (the maximum) are 5 estimated tokens each. With a high term
+		// cap and char budget, only the token cap can stop it, at ~80 terms.
+		const many = Array.from({ length: 400 }, (_, i) => `term${String(i).padStart(16, "0")}`);
+		const out = sanitizeKeyterms(many, { maxChars: 100_000, maxTerms: 1000 });
+		expect(out.length).toBeGreaterThan(DEFAULT_MAX_TERMS);
+		expect(out.length).toBeLessThan(1000);
 		expect(estimateKeytermTokens(out)).toBeLessThanOrEqual(400);
+		expect(estimateKeytermTokens(out)).toBeGreaterThan(350);
+	});
+
+	test("rejects a phrase whose words are all too short to carry signal", () => {
+		expect(sanitizeKeyterms(["a b c"])).toEqual([]);
+		// One real word is enough to keep a phrase with a short acronym.
+		expect(sanitizeKeyterms(["TS config"])).toEqual(["TS config"]);
 	});
 
 	test("every seed term survives sanitisation", () => {
@@ -206,6 +218,12 @@ describe("pathLikeTokens", () => {
 	test("finds paths and ignores bare words", () => {
 		expect(pathLikeTokens("look at src/foo/bar.ts and README")).toEqual(["src/foo/bar.ts"]);
 	});
+
+	test("does not mistake a prose slash pair for a path", () => {
+		// Otherwise "read/write" becomes the generic keyterm "write".
+		expect(pathLikeTokens("read/write and/or")).toEqual([]);
+		expect(pathLikeTokens("edit src/foo/bar.ts")).toEqual(["src/foo/bar.ts"]);
+	});
 });
 
 describe("mineKeyterms", () => {
@@ -287,5 +305,20 @@ describe("collectKeyterms", () => {
 	test("dedupes a term that appears in both the seed list and the project", () => {
 		const terms = collectKeyterms({ cwd: "/x/worktree", useSeed: true });
 		expect(terms.filter((term) => term.toLowerCase() === "worktree").length).toBe(1);
+	});
+});
+
+describe("collectKeytermSets", () => {
+	test("biases with the seed list but keeps it out of correction", () => {
+		const set = collectKeytermSets({ userTerms: ["zzzcustom"], cwd: "/x/marginalia" });
+
+		expect(set.bias).toContain(SEED_KEYTERMS[0]!);
+		expect(set.correct).toEqual(["zzzcustom", "marginalia"]);
+	});
+
+	test("reports truncation when the budget is reached", () => {
+		const set = collectKeytermSets({ userTerms: ["one", "two"], cwd: "/x/marginalia", maxTerms: 2 });
+
+		expect(set.truncated).toBe(true);
 	});
 });

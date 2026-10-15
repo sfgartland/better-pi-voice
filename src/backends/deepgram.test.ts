@@ -194,6 +194,22 @@ describe("finalize", () => {
 		expect(await promise).toBe("timeout");
 	});
 
+	test("waits for the connection, then flushes buffered audio before closing", async () => {
+		const { stream, socket } = await started();
+		// Audio and the finalize both arrive while the socket is still CONNECTING.
+		stream.feed(Buffer.alloc(3200));
+		const promise = stream.finalize();
+		expect(socket.sent).toEqual([]);
+
+		socket.open();
+		// The buffered audio goes first, then CloseStream; nothing is lost.
+		expect(socket.binaryBytes).toBe(3200);
+		expect(socket.jsonSent).toContainEqual({ type: "CloseStream" });
+
+		socket.emit({ type: "Metadata" });
+		expect(await promise).toBe("complete");
+	});
+
 	test("reports closed_early when the server hangs up instead of confirming", async () => {
 		const { stream, socket } = await started();
 		socket.open();
@@ -261,6 +277,18 @@ describe("keepalive", () => {
 		const { socket, clock } = await started({ keepAliveMs: 5000 });
 		clock.advance(20_000);
 		expect(socket.sent).toEqual([]);
+	});
+
+	test("keeps sending keepalives after one send fails", async () => {
+		const { socket, clock } = await started({ keepAliveMs: 5000 });
+		socket.open();
+		socket.failNextSendOnce();
+
+		clock.advance(5000); // this KeepAlive throws
+		clock.advance(5000); // but the timer must have been re-armed
+
+		const keepAlives = socket.jsonSent.filter((item) => JSON.stringify(item) === JSON.stringify({ type: "KeepAlive" }));
+		expect(keepAlives.length).toBe(1);
 	});
 
 	test("stops the keepalive when the stream closes", async () => {

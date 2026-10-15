@@ -17,6 +17,7 @@ import { type Clock, systemClock, type TimerHandle } from "./clock.ts";
 import { AUDIO_SIGNAL_THRESHOLD, AudioRecorder, FrameCoalescer, LevelRing, levelFromS16le } from "./formats.ts";
 import { type CorrectionMode, correctTranscript } from "./keyterms/correct.ts";
 import type { FinalizeOutcome, VoiceBackend, VoiceEvent, VoiceStream } from "./types.ts";
+import type { KeytermSet } from "./keyterms/index.ts";
 
 export type VoiceState = "idle" | "arming" | "recording" | "processing" | "paused";
 
@@ -68,13 +69,13 @@ export type ControllerDeps = {
 	mode: "hold" | "tap";
 	language: string;
 	correction: CorrectionMode;
-	keyterms: () => Promise<string[]>;
+	keyterms: () => Promise<KeytermSet>;
 	clock?: Clock | undefined;
 	timings?: Partial<ControllerTimings> | undefined;
 	hooks?: ControllerHooks | undefined;
 };
 
-type TimerName = "fallback" | "release" | "silence" | "max";
+type TimerName = "retry" | "fallback" | "release" | "silence" | "max";
 
 export class VoiceController {
 	private state: VoiceState = "idle";
@@ -93,6 +94,8 @@ export class VoiceController {
 	/** Latest interim that no final has superseded yet. */
 	private pendingInterim = "";
 	private keytermsUsed: string[] = [];
+	/** Vocabulary the correction pass may repair toward (no seed jargon). */
+	private correctionTerms: string[] = [];
 	private hadAudioSignal = false;
 	private sawTranscript = false;
 	private streamWasConnected = false;
@@ -153,8 +156,14 @@ export class VoiceController {
 
 	/** Discard the session without submitting anything. */
 	cancel(): void {
-		if (this.state === "idle") return;
+		if (this.state === "idle") {
+			// A begin() may be in flight without having changed the state yet, so idle
+			// does not mean there is nothing to cancel: invalidate it.
+			this.generation++;
+			return;
+		}
 		this.debug("cancelled");
+		this.generation++;
 		this.endSession();
 		this.setState("idle");
 	}
@@ -211,17 +220,18 @@ export class VoiceController {
 	}
 
 	private async openStream(generation: number): Promise<VoiceStream | undefined> {
-		let keyterms: string[] = [];
+		let set: KeytermSet = { bias: [], correct: [], truncated: false };
 		try {
-			keyterms = await this.deps.keyterms();
+			set = await this.deps.keyterms();
 		} catch (error) {
 			this.debug(`keyterm mining failed: ${String(error)}`);
 		}
 		if (generation !== this.generation) return undefined;
-		this.keytermsUsed = keyterms;
+		this.keytermsUsed = set.bias;
+		this.correctionTerms = set.correct;
 
 		const stream = await this.deps.backend.start(
-			{ language: this.deps.language, keyterms, signal: new AbortController().signal },
+			{ language: this.deps.language, keyterms: set.bias, signal: new AbortController().signal },
 			(event) => this.onEvent(event, generation),
 		);
 		if (!stream) return undefined;
@@ -273,6 +283,7 @@ export class VoiceController {
 	private async finalizeStream(): Promise<FinalizeOutcome> {
 		const stream = this.stream;
 		if (!stream) return "already_closed";
+		this.noteConnected();
 		try {
 			return await stream.finalize();
 		} catch (error) {
@@ -309,6 +320,11 @@ export class VoiceController {
 		if (generation !== this.generation) return false;
 		this.debug(`replay finished with ${outcome}`);
 		return this.transcript.trim().length > 0;
+	}
+
+	/** Record that the stream reached OPEN at least once, for replay decisions. */
+	private noteConnected(): void {
+		if (!this.streamWasConnected && this.stream?.isConnected()) this.streamWasConnected = true;
 	}
 
 	private isUnconfirmed(outcome: FinalizeOutcome): boolean {
@@ -350,6 +366,7 @@ export class VoiceController {
 		this.transcript = "";
 		this.pendingInterim = "";
 		this.keytermsUsed = [];
+		this.correctionTerms = [];
 		this.hadAudioSignal = false;
 		this.sawTranscript = false;
 		this.streamWasConnected = false;
@@ -364,6 +381,7 @@ export class VoiceController {
 
 	private onData(chunk: Buffer, generation: number): void {
 		if (generation !== this.generation) return;
+		this.noteConnected();
 
 		const level = levelFromS16le(chunk);
 		if (level > AUDIO_SIGNAL_THRESHOLD) this.hadAudioSignal = true;
@@ -432,6 +450,9 @@ export class VoiceController {
 
 	private onEvent(event: VoiceEvent, generation: number): void {
 		if (generation !== this.generation) return;
+		// Any transcript means the socket was genuinely connected; the replay path
+		// needs to know that even after the connection later drops.
+		if (event.type === "interim" || event.type === "final") this.streamWasConnected = true;
 
 		switch (event.type) {
 			case "interim": {
@@ -484,10 +505,10 @@ export class VoiceController {
 		if (!this.sawTranscript && !this.retried) {
 			this.retried = true;
 			this.debug("early stream error; retrying once");
-			this.clock.setTimeout(() => {
+			this.arm("retry", this.timings.earlyRetryDelayMs, () => {
 				if (generation !== this.generation || this.state !== "recording") return;
 				void this.retryStream(generation);
-			}, this.timings.earlyRetryDelayMs);
+			});
 			return;
 		}
 
@@ -510,8 +531,15 @@ export class VoiceController {
 		}
 		this.stream = undefined;
 		const stream = await this.openStream(generation);
-		if (generation !== this.generation || !stream) return;
-		// A fresh stream has received nothing, so it needs the whole session.
+		if (generation !== this.generation) return;
+		if (!stream) {
+			this.fail("Could not reconnect to the voice service.", "connect_failed", { recordFailure: true });
+			return;
+		}
+		// A fresh stream has received nothing, so it needs the whole session. The
+		// coalescer may still hold an un-flushed tail that `audio.all()` already
+		// includes, so drop it first rather than sending that tail twice, out of order.
+		this.coalescer.flush();
 		const audio = this.audio.all();
 		if (audio) this.feedBuffer(stream, audio);
 		this.audio.markAllSent();
@@ -524,7 +552,7 @@ export class VoiceController {
 		if (!text) return;
 
 		if (this.deps.backend.capabilities.biasing === "none" && this.deps.correction !== "off") {
-			const result = correctTranscript(text, this.keytermsUsed, this.deps.correction);
+			const result = correctTranscript(text, this.correctionTerms, this.deps.correction);
 			for (const change of result.changes) {
 				this.debug(`correction: ${change.from} -> ${change.to}`);
 			}
@@ -582,6 +610,9 @@ export class VoiceController {
 
 	private fail(message: string, code: string, options: { recordFailure?: boolean } = {}): void {
 		if (options.recordFailure) this.recordFailure();
+		// Invalidate in-flight async work with this generation, now that the
+		// session is over.
+		this.generation++;
 		this.endSession();
 		this.deps.hooks?.onError?.(message, code);
 		this.setState(this.failureTimes.length >= this.timings.breakerThreshold ? "paused" : "idle");
@@ -644,7 +675,7 @@ export class VoiceController {
 	}
 
 	private clearSessionTimers(): void {
-		for (const name of ["fallback", "release", "silence", "max"] as const) this.clearTimer(name);
+		for (const name of ["retry", "fallback", "release", "silence", "max"] as const) this.clearTimer(name);
 	}
 
 	private setState(state: VoiceState): void {

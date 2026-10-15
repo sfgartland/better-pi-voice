@@ -52,6 +52,9 @@ function isAcceptable(term: string): boolean {
 	if (words.length === 1) {
 		return term.length >= MIN_TERM_LENGTH && term.length <= MAX_TERM_LENGTH;
 	}
+	// A phrase needs at least one word long enough to carry signal, or "a b c"
+	// rides in on the phrase allowance; every word still has to fit the window.
+	if (words.every((word) => word.length < MIN_TERM_LENGTH)) return false;
 	return words.every((word) => word.length <= MAX_TERM_LENGTH);
 }
 

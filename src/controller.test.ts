@@ -39,7 +39,7 @@ function makeHarness(overrides: Partial<ControllerDeps> = {}, timings: Partial<C
 		mode: "hold",
 		language: "en",
 		correction: "safe",
-		keyterms: async () => [],
+		keyterms: async () => ({ bias: [], correct: [], truncated: false }),
 		clock,
 		timings,
 		hooks: {
@@ -296,7 +296,7 @@ describe("recovery: early retry", () => {
 		expect(h.errors).toEqual([]);
 	});
 
-	test("re-feeds the audio captured so far into the new stream", async () => {
+	test("re-feeds the audio captured so far into the new stream, exactly once", async () => {
 		const h = makeHarness({}, { earlyRetryDelayMs: 250 });
 		h.backend.plans = [{ events: [{ type: "error", message: "boom" }] }, {}];
 
@@ -305,8 +305,10 @@ describe("recovery: early retry", () => {
 		h.clock.advance(250);
 		await flush();
 
-		// The second stream must have received the session audio, not just the tail.
-		expect(h.backend.streams[1]!.bytesReceived).toBeGreaterThanOrEqual(3200);
+		// The second stream gets the whole session exactly once. The un-flushed
+		// coalescer tail is already inside `audio.all()`, so it must be dropped,
+		// not sent first and then again.
+		expect(h.backend.streams[1]!.bytesReceived).toBe(3200);
 	});
 
 	test("does not retry a second time", async () => {
@@ -364,6 +366,23 @@ describe("recovery: silent-drop replay", () => {
 		expect(h.backend.startCount).toBe(2);
 		expect(h.backend.streams[1]!.bytesReceived).toBe(6400);
 		expect(h.finals).toEqual(["text from the replay"]);
+	});
+
+	test("replays when the socket only opened after start() returned", async () => {
+		const h = makeHarness();
+		h.backend.plans = [{ connected: false, finalizeOutcome: "timeout" }, { finalOnFinalize: "from replay" }];
+
+		await start(h);
+		// The real Deepgram socket is still CONNECTING when start() resolves; it
+		// opens a moment later, and the replay path has to have noticed.
+		h.backend.last!.plan.connected = true;
+		h.capture.emit(pcmOf(500, 6400));
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+
+		expect(h.backend.startCount).toBe(2);
+		expect(h.finals).toEqual(["from replay"]);
 	});
 
 	test("replays when the stream closes early", async () => {
@@ -492,7 +511,9 @@ describe("recovery: circuit breaker", () => {
 
 describe("keyterms", () => {
 	test("passes the mined keyterms to the backend", async () => {
-		const h = makeHarness({ keyterms: async () => ["subagent", "worktree"] });
+		const h = makeHarness({
+			keyterms: async () => ({ bias: ["subagent", "worktree"], correct: ["subagent", "worktree"], truncated: false }),
+		});
 		await start(h);
 
 		expect(h.backend.lastOptions?.keyterms).toEqual(["subagent", "worktree"]);
@@ -514,7 +535,10 @@ describe("keyterms", () => {
 
 describe("correction", () => {
 	test("repairs misheard keyterms for backends that cannot be biased", async () => {
-		const h = makeHarness({ correction: "safe", keyterms: async () => ["subagent"] });
+		const h = makeHarness({
+			correction: "safe",
+			keyterms: async () => ({ bias: ["subagent"], correct: ["subagent"], truncated: false }),
+		});
 		h.backend.capabilities = { streaming: true, biasing: "none", languages: ["en"] };
 		h.backend.plans = [{ finalOnFinalize: "the subagnet ran" }];
 
@@ -527,8 +551,30 @@ describe("correction", () => {
 		expect(h.finals).toEqual(["the subagent ran"]);
 	});
 
+	test("only corrects toward the correction list, not the bias list", async () => {
+		// The seed jargon is biasing-only: given it here, "parse" would become
+		// "parser".
+		const h = makeHarness({
+			correction: "safe",
+			keyterms: async () => ({ bias: ["parser"], correct: [], truncated: false }),
+		});
+		h.backend.capabilities = { streaming: true, biasing: "none", languages: ["en"] };
+		h.backend.plans = [{ finalOnFinalize: "parse the file" }];
+
+		await start(h);
+		h.capture.emit(pcmOf(500, 3200));
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+
+		expect(h.finals).toEqual(["parse the file"]);
+	});
+
 	test("leaves text alone for backends that bias natively", async () => {
-		const h = makeHarness({ correction: "safe", keyterms: async () => ["subagent"] });
+		const h = makeHarness({
+			correction: "safe",
+			keyterms: async () => ({ bias: ["subagent"], correct: ["subagent"], truncated: false }),
+		});
 		h.backend.capabilities = { streaming: true, biasing: "native", languages: ["en"] };
 		h.backend.plans = [{ finalOnFinalize: "the subagnet ran" }];
 
@@ -543,6 +589,16 @@ describe("correction", () => {
 });
 
 describe("cancel", () => {
+	test("cancel immediately after press does not resurrect the session", async () => {
+		const h = makeHarness();
+		h.controller.press();
+		h.controller.cancel();
+		await flush();
+
+		expect(h.controller.currentState).toBe("idle");
+		expect(h.states).not.toContain("recording");
+	});
+
 	test("discards the session without emitting a final", async () => {
 		const h = makeHarness();
 		h.backend.plans = [{ events: [{ type: "final", text: "should be discarded" }] }];

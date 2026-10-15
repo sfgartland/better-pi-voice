@@ -17,6 +17,7 @@
 import { type Clock, systemClock, type TimerHandle } from "../clock.ts";
 import type { FinalizeOutcome, StartOptions, VoiceBackend, VoiceEvent, VoiceStream } from "../types.ts";
 
+const CONNECTING = 0;
 const OPEN = 1;
 const CLOSED = 3;
 const DEFAULT_BASE_URL = "wss://api.deepgram.com/v1/listen";
@@ -134,6 +135,8 @@ class DeepgramStream implements VoiceStream {
 	private closed = false;
 	private sentBytes = 0;
 	private settle: ((outcome: FinalizeOutcome) => void) | undefined;
+	/** Set when finalize() is called while the socket is still CONNECTING. */
+	private pendingFinalize: ((outcome: FinalizeOutcome) => void) | undefined;
 
 	constructor(
 		private readonly socket: MinimalSocket,
@@ -192,16 +195,28 @@ class DeepgramStream implements VoiceStream {
 				settled = true;
 				this.clock.clearTimeout(safety);
 				this.settle = undefined;
+				this.pendingFinalize = undefined;
 				resolve(outcome);
 			};
 			const safety = this.clock.setTimeout(() => finish("timeout"), this.finalizeSafetyMs);
 			this.settle = finish;
-			try {
-				this.socket.send(JSON.stringify({ type: "CloseStream" }));
-			} catch {
-				finish("closed_early");
+
+			if (this.socket.readyState === CONNECTING) {
+				// Still connecting. onOpen flushes the buffered audio first, so wait for
+				// it and close then; sending now would throw and lose the buffered audio.
+				this.pendingFinalize = finish;
+				return;
 			}
+			this.sendCloseStream(finish);
 		});
+	}
+
+	private sendCloseStream(finish: (outcome: FinalizeOutcome) => void): void {
+		try {
+			this.socket.send(JSON.stringify({ type: "CloseStream" }));
+		} catch {
+			finish("closed_early");
+		}
 	}
 
 	close(): void {
@@ -235,14 +250,25 @@ class DeepgramStream implements VoiceStream {
 		this.preOpen = [];
 		this.preOpenBytes = 0;
 		this.keepAlive = this.clock.setTimeout(() => this.sendKeepAlive(), this.keepAliveMs);
+
+		// A finalize that arrived while connecting can go out now that the buffered
+		// audio has been sent.
+		const pending = this.pendingFinalize;
+		if (pending) {
+			this.pendingFinalize = undefined;
+			this.sendCloseStream(pending);
+		}
 	}
 
 	private sendKeepAlive(): void {
 		if (this.closed || this.finalized || this.socket.readyState !== OPEN) return;
 		try {
 			this.socket.send(JSON.stringify({ type: "KeepAlive" }));
-		} catch {
-			return;
+		} catch (error) {
+			// Re-arm regardless: a single failed send must not stop keepalives for the
+			// rest of the session. If the socket is no longer OPEN the next call is a
+			// no-op anyway.
+			this.debug(`keepalive send failed: ${String(error)}`);
 		}
 		this.keepAlive = this.clock.setTimeout(() => this.sendKeepAlive(), this.keepAliveMs);
 	}

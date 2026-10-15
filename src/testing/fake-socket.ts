@@ -8,6 +8,7 @@ export class FakeSocket implements MinimalSocket {
 	onmessage: ((event: { data: unknown }) => void) | null = null;
 	onerror: ((event: unknown) => void) | null = null;
 	onclose: ((event: SocketCloseEvent) => void) | null = null;
+	private failNextSend = false;
 
 	constructor(
 		readonly url: string,
@@ -15,6 +16,12 @@ export class FakeSocket implements MinimalSocket {
 	) {}
 
 	send(data: string | ArrayBufferView): void {
+		if (this.failNextSend) {
+			this.failNextSend = false;
+			throw new Error("send failed");
+		}
+		// A real WebSocket throws while CONNECTING or CLOSED.
+		if (this.readyState !== 1) throw new Error("socket is not open");
 		this.sent.push(data);
 	}
 
@@ -41,6 +48,11 @@ export class FakeSocket implements MinimalSocket {
 
 	fail(): void {
 		this.onerror?.({});
+	}
+
+	/** Make the next send() throw, as a socket that just closed would. */
+	failNextSendOnce(): void {
+		this.failNextSend = true;
 	}
 
 	remoteClose(code = 1006, reason = ""): void {

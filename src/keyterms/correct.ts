@@ -27,7 +27,9 @@ export const MIN_CORRECTABLE_LENGTH = 5;
  * reach for short tokens. Only the adjacent-swap case is added, so the metric
  * stays deliberately conservative.
  *
- * Returns `limit + 1` as soon as the distance is known to exceed `limit`.
+ * Prunes as soon as a whole row exceeds `limit`. The returned value can be the
+ * true distance above `limit`, so callers must compare with `> limit`; only the
+ * `a === b` short-circuit returns exactly 0.
  */
 export function editDistance(a: string, b: string, limit: number): number {
 	if (a === b) return 0;

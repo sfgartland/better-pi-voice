@@ -83,10 +83,17 @@ export function filePathsFromBranch(entries: readonly unknown[]): string[] {
 /**
  * Pull path-like strings out of prose. Requires a separator, so "README" alone
  * is not treated as a path but "src/foo/bar.ts" is.
+ *
+ * A single separator with no file-looking tail is usually prose, not a path:
+ * "read/write and/or" would otherwise yield the generic keyterm "write".
  */
 export function pathLikeTokens(text: string): string[] {
-	const found = text.match(/[A-Za-z0-9_.-]*(?:\/[A-Za-z0-9_.-]+)+/g);
-	return found ?? [];
+	const found = text.match(/[A-Za-z0-9_.-]*(?:\/[A-Za-z0-9_.-]+)+/g) ?? [];
+	return found.filter((token) => {
+		const segments = token.split("/").filter(Boolean);
+		const last = segments[segments.length - 1] ?? "";
+		return last.includes(".") || segments.length >= 3;
+	});
 }
 
 /** Basename without its extension, because nobody says "dot tee ess". */

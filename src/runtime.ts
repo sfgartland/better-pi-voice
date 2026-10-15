@@ -4,19 +4,22 @@
 
 import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { isKeyRelease, isKeyRepeat, type KeyId, matchesKey } from "@earendil-works/pi-tui";
+import { isKeyRelease, isKeyRepeat, isKittyProtocolActive, type KeyId, matchesKey } from "@earendil-works/pi-tui";
 import { DeepgramBackend } from "./backends/deepgram.ts";
 import { ParakeetBackend } from "./backends/parakeet.ts";
 import type { Capture } from "./capture.ts";
 import { SystemCapture } from "./capture.ts";
 import { VoiceController, type VoiceState } from "./controller.ts";
-import { collectKeyterms, filePathsFromBranch } from "./keyterms/index.ts";
+import { collectKeytermSets, filePathsFromBranch, type KeytermSet } from "./keyterms/index.ts";
 import { resolveDeepgramApiKey, type VoiceSettings } from "./settings.ts";
 import type { VoiceBackend } from "./types.ts";
 import { EditorSink, LEVEL_WIDGET_KEY, renderLevelBar, STATUS_KEY, statusText } from "./ui.ts";
 
 /** Repaint the meter at most this often; the TUI is on the hot path. */
 const LEVEL_FRAME_MS = 60;
+
+/** Say the hold-mode fallback notice at most once per process. */
+let warnedAboutRelease = false;
 
 export type Runtime = {
 	toggle(): void;
@@ -93,6 +96,14 @@ export async function createRuntime(
 
 	const backend = createBackend(settings);
 	const label = backendLabel(settings);
+
+	// Hold-to-talk needs the key *release* event, which the terminal only reports
+	// under the Kitty keyboard protocol. Probe for it instead of assuming: if
+	// releases will never arrive, hold mode would leave the microphone open until
+	// the repeat fallback fires, so degrade to tap-to-toggle and say so once.
+	const releaseSupported = isKittyProtocolActive();
+	const effectiveMode: "hold" | "tap" = settings.mode === "hold" && !releaseSupported ? "tap" : settings.mode;
+	const fellBackToTap = settings.mode === "hold" && effectiveMode === "tap";
 	const capture: Capture = new SystemCapture();
 	const editor = new EditorSink({
 		get: () => ctx.ui.getEditorText(),
@@ -101,17 +112,18 @@ export async function createRuntime(
 
 	let lastLevelPaint = 0;
 
-	const keyterms = async (): Promise<string[]> => {
-		if (!settings.keyterms.enabled) return [];
+	const keyterms = async (): Promise<KeytermSet> => {
+		const empty: KeytermSet = { bias: [], correct: [], truncated: false };
+		if (!settings.keyterms.enabled) return empty;
 		let repoName: string | undefined;
 		let filePaths: string[] = [];
 		try {
-			const cwd = process.cwd();
+			const cwd = ctx.cwd;
 			repoName = await detectRepoName(pi, cwd);
 			if (settings.keyterms.mineSessionFiles) {
 				filePaths = filePathsFromBranch(ctx.sessionManager.getBranch() as unknown[]);
 			}
-			return collectKeyterms({
+			const set = collectKeytermSets({
 				cwd,
 				repoName,
 				filePaths,
@@ -119,16 +131,18 @@ export async function createRuntime(
 				useSeed: settings.keyterms.seed,
 				maxTerms: settings.keyterms.maxTerms,
 			});
+			if (set.truncated) logger.debug(`keyterm list truncated to ${String(set.bias.length)}`);
+			return set;
 		} catch (error) {
 			logger.debug(`keyterm mining failed: ${String(error)}`);
-			return [];
+			return empty;
 		}
 	};
 
 	const controller = new VoiceController({
 		backend,
 		capture,
-		mode: settings.mode,
+		mode: effectiveMode,
 		language: settings.language,
 		correction: settings.correction,
 		keyterms,
@@ -175,7 +189,7 @@ export async function createRuntime(
 	// Hold-to-talk needs key *release*, which only exists in the raw input
 	// stream. Tap mode uses the ordinary shortcut registration instead.
 	let unsubscribeInput: (() => void) | undefined;
-	if (settings.mode === "hold" && ctx.mode === "tui") {
+	if (effectiveMode === "hold" && ctx.mode === "tui") {
 		unsubscribeInput = ctx.ui.onTerminalInput((data) => {
 			const isRelease = isKeyRelease(data);
 			const isRepeat = isKeyRepeat(data);
@@ -187,6 +201,20 @@ export async function createRuntime(
 			// Swallow the binding so it does not land in the editor as text.
 			return { consume: true };
 		});
+	} else if (fellBackToTap) {
+		// The configured hold mode cannot work on this terminal, so wire the
+		// shortcut itself as a toggle.
+		pi.registerShortcut(settings.shortcut as KeyId, {
+			description: "Start or stop voice input",
+			handler: () => controller.press(),
+		});
+		if (!warnedAboutRelease) {
+			warnedAboutRelease = true;
+			logger.notify(
+				`This terminal does not report key releases, so hold-to-talk is unavailable. Tap ${settings.shortcut} to start and stop instead.`,
+				"warning",
+			);
+		}
 	}
 
 	return {
