@@ -150,6 +150,19 @@ bundled `linux-x64-cpu-vulkan` build cannot open this GPU — the driver reports
 while you speak. Treat the local backend as the private/offline option, not the fast
 one, until it is running on a usable compute backend.
 
+### Keeping the model loaded
+
+Loading the GGUF is slow enough that unloading it the moment a recording ends would be
+felt on the next one, so the model stays resident after a session and is released when
+either of these happens first:
+
+- **15 minutes** pass with no recording (`parakeet.idleUnloadMs`)
+- the machine gets busy — one-minute load average per CPU reaching **0.8**
+  (`parakeet.loadShedRatio`), checked once a minute
+
+A new recording cancels a pending release, and `idleUnloadMs: 0` releases immediately.
+The model is also released on session shutdown.
+
 ## Settings
 
 `~/.pi/agent/better-pi-voice.json`. Every field is optional; anything missing or
@@ -169,7 +182,11 @@ malformed falls back to a default and warns rather than breaking the microphone.
     "endpointingMs": 300,             // silence before an utterance is finalised
     "utteranceEndMs": 1000
   },
-  "parakeet": { "modelPath": null },  // null = read pi-voice's config if present
+  "parakeet": {
+    "modelPath": null,                // null = read pi-voice's config if present
+    "idleUnloadMs": 900000,           // keep the model resident after a recording
+    "loadShedRatio": 0.8              // release early once load per CPU reaches this
+  },
   "keyterms": {
     "enabled": true,
     "seed": true,
@@ -181,6 +198,25 @@ malformed falls back to a default and warns rather than breaking the microphone.
   "submitOnStop": false               // false = leave the text in the editor
 }
 ```
+
+## When something goes wrong
+
+Failures are reported with a cause rather than "check your network":
+
+- **The microphone starts first.** Capture begins as soon as the key goes down, and
+audio is buffered and then sent the instant the backend is ready — so the first
+syllable is not lost while a model loads or a websocket connects. The microphone is
+also probed at session start, so a missing device is reported then rather than when you
+first hold the key.
+- **Connection failures are diagnosed.** When the websocket fails, the extension makes
+a small authenticated REST call to Deepgram and reports which it was: `Deepgram
+rejected the API key`, `could not reach Deepgram (getaddrinfo ENOTFOUND ...)`, or
+`Deepgram returned HTTP 503`. The websocket close code alone cannot distinguish those.
+- **Errors carry their detail.** Whatever the socket's error event holds is included
+in the message instead of a bare "connection error".
+- **Speech is never lost.** One retry before the first transcript, replay of the
+retained audio when a stream silently drops, partial transcripts salvaged, unreported
+interims promoted to finals, and a circuit breaker after three fast failures.
 
 ## Privacy
 

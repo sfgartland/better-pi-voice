@@ -64,6 +64,7 @@ export type DeepgramBackendOptions = {
 	baseUrl?: string | undefined;
 	keepAliveMs?: number | undefined;
 	finalizeSafetyMs?: number | undefined;
+	probeTimeoutMs?: number | undefined;
 	clock?: Clock | undefined;
 	socketFactory?: SocketFactory | undefined;
 	/** Optional trace of the send/receive path, mirroring the reference's [voice_stream] logs. */
@@ -90,6 +91,19 @@ export function buildListenUrl(query: DeepgramQuery, baseUrl: string = DEFAULT_B
 		params.append("keyterm", term);
 	}
 	return `${baseUrl}?${params.toString()}`;
+}
+
+/** Extract whatever an error event happens to carry. */
+function socketErrorDetail(event: unknown): string | undefined {
+	if (!event || typeof event !== "object") return undefined;
+	const candidate = event as { message?: unknown; error?: { message?: unknown }; type?: unknown };
+	if (typeof candidate.message === "string" && candidate.message.trim()) return candidate.message.trim();
+	const nested = candidate.error?.message;
+	if (typeof nested === "string" && nested.trim()) return nested.trim();
+	if (typeof candidate.type === "string" && candidate.type.trim() && candidate.type !== "error") {
+		return candidate.type.trim();
+	}
+	return undefined;
 }
 
 const defaultSocketFactory: SocketFactory = (url, apiKey) => {
@@ -131,7 +145,7 @@ class DeepgramStream implements VoiceStream {
 	) {
 		socket.onopen = () => this.onOpen();
 		socket.onmessage = (event) => this.onMessage(event);
-		socket.onerror = () => this.onError();
+		socket.onerror = (event) => this.onError(event);
 		socket.onclose = (event) => this.onClose(event);
 	}
 
@@ -277,9 +291,16 @@ class DeepgramStream implements VoiceStream {
 		}
 	}
 
-	private onError(): void {
+	private onError(event?: unknown): void {
 		if (this.finalized) return;
-		this.emit({ type: "error", message: "Voice stream connection error.", code: "ws_error" });
+		// Bun, Node and browsers each put something different here, and on a
+		// network failure the detail is the entire message.
+		const detail = socketErrorDetail(event);
+		this.emit({
+			type: "error",
+			message: detail ? `Voice stream connection error: ${detail}` : "Voice stream connection error.",
+			code: "ws_error",
+		});
 	}
 
 	private onClose(event: SocketCloseEvent): void {
@@ -325,6 +346,34 @@ export class DeepgramBackend implements VoiceBackend {
 			};
 		}
 		return { available: true };
+	}
+
+	/** The REST root that matches the configured websocket endpoint. */
+	private apiRoot(): string {
+		return (this.options.baseUrl ?? DEFAULT_BASE_URL).replace(/^ws/, "http").replace(/\/listen\b.*$/, "");
+	}
+
+	/**
+	 * Explain a connection failure. A websocket close code alone cannot tell a
+	 * bad key apart from a dead network, and those need different fixes.
+	 */
+	async probe(): Promise<string> {
+		const apiKey = this.options.apiKey;
+		if (!apiKey) return "no API key is configured";
+		try {
+			const response = await fetch(`${this.apiRoot()}/projects`, {
+				headers: { Authorization: `Token ${apiKey}` },
+				signal: AbortSignal.timeout(this.options.probeTimeoutMs ?? 1500),
+			});
+			if (response.status === 401 || response.status === 403) return "Deepgram rejected the API key";
+			if (response.ok) return `Deepgram is reachable (HTTP ${String(response.status)}), so the key is accepted`;
+			return `Deepgram returned HTTP ${String(response.status)}`;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return /timeout|abort/i.test(message)
+				? "Deepgram did not respond in time"
+				: `could not reach Deepgram (${message})`;
+		}
 	}
 
 	async start(options: StartOptions, emit: (event: VoiceEvent) => void): Promise<VoiceStream | undefined> {

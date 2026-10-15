@@ -168,7 +168,7 @@ export default async function betterPiVoice(pi: ExtensionAPI): Promise<void> {
 
 	pi.on("session_shutdown", async () => {
 		disposed = true;
-		runtime?.dispose();
+		await runtime?.dispose();
 		runtime = undefined;
 		runtimePromise = undefined;
 	});

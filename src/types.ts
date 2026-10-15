@@ -66,4 +66,12 @@ export type VoiceBackend = {
 	checkAvailability(): Promise<{ available: boolean; reason?: string }>;
 	/** Resolve to `undefined` when the stream could not be started at all. */
 	start(options: StartOptions, emit: (event: VoiceEvent) => void): Promise<VoiceStream | undefined>;
+	/**
+	 * Optional diagnostic run after a connection failure, so the message can say
+	 * *why* it failed instead of telling the user to check their network.
+	 * Resolves to a short phrase such as "Deepgram rejected the API key".
+	 */
+	probe?(): Promise<string>;
+	/** Optional: release anything held while idle, such as a loaded local model. */
+	dispose?(): void | Promise<void>;
 };

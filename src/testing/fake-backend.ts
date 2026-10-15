@@ -75,6 +75,8 @@ export class FakeBackend implements VoiceBackend {
 	availability: { available: boolean; reason?: string } = { available: true };
 	/** Number of upcoming `start()` calls that return undefined (could not connect). */
 	failToConnect = 0;
+	/** Simulate a backend that takes a while to become ready (model load, connect). */
+	startDelayMs = 0;
 
 	get last(): FakeStream | undefined {
 		return this.streams.at(-1);
@@ -90,6 +92,7 @@ export class FakeBackend implements VoiceBackend {
 	): Promise<VoiceStream | undefined> {
 		this.startCount++;
 		this.lastOptions = options;
+		if (this.startDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.startDelayMs));
 		if (this.failToConnect > 0) {
 			this.failToConnect--;
 			return undefined;

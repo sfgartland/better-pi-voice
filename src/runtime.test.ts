@@ -21,7 +21,7 @@ describe("backendLabel", () => {
 	test("names the local model from its file", () => {
 		const settings = withSettings({
 			backend: "parakeet",
-			parakeet: { modelPath: "/models/parakeet-unified-en-0.6b-Q8_0.gguf" },
+			parakeet: { ...DEFAULT_SETTINGS.parakeet, modelPath: "/models/parakeet-unified-en-0.6b-Q8_0.gguf" },
 		});
 		expect(backendLabel(settings)).toBe("parakeet parakeet-unified-en-0.6b-Q8_0");
 	});
@@ -29,12 +29,15 @@ describe("backendLabel", () => {
 	test("says where the local model comes from when it is inherited", () => {
 		// modelPath null means pi-voice's configuration is used, which is worth
 		// saying out loud rather than showing nothing.
-		const settings = withSettings({ backend: "parakeet", parakeet: { modelPath: null } });
+		const settings = withSettings({ backend: "parakeet", parakeet: { ...DEFAULT_SETTINGS.parakeet, modelPath: null } });
 		expect(backendLabel(settings)).toBe("parakeet pi-voice's model");
 	});
 
 	test("never reports the cloud model while configured for local", () => {
-		const settings = withSettings({ backend: "parakeet", parakeet: { modelPath: "/m/x.gguf" } });
+		const settings = withSettings({
+			backend: "parakeet",
+			parakeet: { ...DEFAULT_SETTINGS.parakeet, modelPath: "/m/x.gguf" },
+		});
 		expect(backendLabel(settings)).not.toContain("deepgram");
 		expect(backendLabel(settings)).not.toContain("nova-3");
 	});

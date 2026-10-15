@@ -579,6 +579,27 @@ describe("audio plumbing", () => {
 		for (const frame of stream.received) expect(frame.length).toBeLessThanOrEqual(32_000);
 	});
 
+	test("buffers audio while a slow backend is still starting up", async () => {
+		const h = makeHarness();
+		// Stand in for a load that takes real time, such as the Parakeet model or
+		// a websocket handshake.
+		h.backend.startDelayMs = 60;
+		h.controller.press();
+		await flush();
+
+		// The microphone is already open, so nothing said during the wait is lost.
+		expect(h.controller.currentState).toBe("recording");
+		expect(h.capture.startCount).toBe(1);
+		h.capture.emit(pcmOf(500, 6400));
+		await new Promise((resolve) => setTimeout(resolve, 120));
+
+		expect(h.backend.last!.bytesReceived).toBe(6400);
+
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+	});
+
 	test("stops sending audio once the stream is closed", async () => {
 		const h = makeHarness({ mode: "tap" });
 		h.backend.plans = [{ finalOnFinalize: "done" }];

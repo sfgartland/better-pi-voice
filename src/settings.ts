@@ -35,6 +35,10 @@ export type VoiceSettings = {
 	};
 	parakeet: {
 		modelPath: string | null;
+		/** Hold the model in memory this long after the last recording. */
+		idleUnloadMs: number;
+		/** Hand the memory back early once load per CPU reaches this. */
+		loadShedRatio: number;
 	};
 	keyterms: {
 		enabled: boolean;
@@ -62,6 +66,8 @@ export const DEFAULT_SETTINGS: VoiceSettings = {
 	},
 	parakeet: {
 		modelPath: null,
+		idleUnloadMs: 15 * 60_000,
+		loadShedRatio: 0.8,
 	},
 	keyterms: {
 		enabled: true,
@@ -116,6 +122,13 @@ function pickInteger(value: unknown, fallback: number, field: string, warnings: 
 	if (value === undefined) return fallback;
 	if (typeof value === "number" && Number.isInteger(value) && value >= min) return value;
 	warnings.push(`${field} must be an integer >= ${min}; using ${fallback}.`);
+	return fallback;
+}
+
+function pickNumber(value: unknown, fallback: number, field: string, warnings: string[], min = 0): number {
+	if (value === undefined) return fallback;
+	if (typeof value === "number" && Number.isFinite(value) && value >= min) return value;
+	warnings.push(`${field} must be a number >= ${min}; using ${fallback}.`);
 	return fallback;
 }
 
@@ -195,6 +208,18 @@ export function parseSettings(raw: unknown): { settings: VoiceSettings; warnings
 			},
 			parakeet: {
 				modelPath: pickNullableString(parakeet.modelPath, null, "parakeet.modelPath", warnings),
+				idleUnloadMs: pickInteger(
+					parakeet.idleUnloadMs,
+					DEFAULT_SETTINGS.parakeet.idleUnloadMs,
+					"parakeet.idleUnloadMs",
+					warnings,
+				),
+				loadShedRatio: pickNumber(
+					parakeet.loadShedRatio,
+					DEFAULT_SETTINGS.parakeet.loadShedRatio,
+					"parakeet.loadShedRatio",
+					warnings,
+				),
 			},
 			keyterms: {
 				enabled: pickBoolean(keyterms.enabled, DEFAULT_SETTINGS.keyterms.enabled, "keyterms.enabled", warnings),

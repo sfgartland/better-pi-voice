@@ -14,9 +14,11 @@
 
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { cpus, loadavg } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { type Clock, systemClock, type TimerHandle } from "../clock.ts";
 import { float32ToS16le, s16leToFloat32 } from "../formats.ts";
 import type { FinalizeOutcome, StartOptions, VoiceBackend, VoiceEvent, VoiceStream } from "../types.ts";
 
@@ -158,10 +160,49 @@ export async function resolveParakeetModelPath(explicit: string | null): Promise
 	return undefined;
 }
 
+/** Loaded models are held for this long after the last session ends. */
+export const DEFAULT_IDLE_UNLOAD_MS = 15 * 60_000;
+/** How often to check whether the machine has become busy while idle. */
+export const DEFAULT_LOAD_CHECK_MS = 60_000;
+/** One-minute load average per CPU at which the model is handed back early. */
+export const DEFAULT_LOAD_SHED_RATIO = 0.8;
+
+/** One-minute load average per CPU. Zero on platforms that do not report it. */
+export function defaultSystemLoad(): number {
+	try {
+		const cores = cpus().length || 1;
+		return (loadavg()[0] ?? 0) / cores;
+	} catch {
+		return 0;
+	}
+}
+
 export type ParakeetBackendOptions = {
 	modelPath: string | null;
 	language?: string | undefined;
+	/**
+	 * Keep the model in memory this long after the last session, because loading
+	 * it is slow enough that unloading immediately would be felt on the next
+	 * recording. Zero unloads as soon as a session ends.
+	 */
+	idleUnloadMs?: number | undefined;
+	/** Hand the memory back early once load per CPU reaches this. */
+	loadShedRatio?: number | undefined;
+	/** How often to re-check system load during the idle window. */
+	loadCheckMs?: number | undefined;
+	clock?: Clock | undefined;
+	/** Injectable for tests. */
+	systemLoad?: (() => number) | undefined;
+	/** Injectable for tests, so residency can be exercised without a GGUF. */
+	loadModel?: ((path: string) => Promise<CppModel>) | undefined;
 };
+
+async function defaultLoadModel(path: string): Promise<CppModel> {
+	const { TranscribeModel } = (await loadTranscribeCpp()) as unknown as {
+		TranscribeModel: { load(path: string): Promise<CppModel> };
+	};
+	return TranscribeModel.load(path);
+}
 
 class ParakeetStream implements VoiceStream {
 	private committed = "";
@@ -174,6 +215,7 @@ class ParakeetStream implements VoiceStream {
 		private readonly stream: CppStream,
 		private readonly session: CppSession,
 		private readonly emit: (event: VoiceEvent) => void,
+		private readonly onReleased: () => void = () => {},
 	) {}
 
 	feed(pcm: Buffer): void | Promise<void> {
@@ -281,6 +323,7 @@ class ParakeetStream implements VoiceStream {
 			// ignore
 		}
 		this.session.dispose();
+		this.onReleased();
 	}
 }
 
@@ -291,8 +334,89 @@ export class ParakeetBackend implements VoiceBackend {
 
 	private resolution: Promise<string | undefined> | undefined;
 	private model_: CppModel | undefined;
+	private idleTimer: TimerHandle | undefined;
+	private loadTimer: TimerHandle | undefined;
+	private readonly clock: Clock;
+	private readonly idleUnloadMs: number;
+	private readonly loadShedRatio: number;
+	private readonly loadCheckMs: number;
 
-	constructor(private readonly options: ParakeetBackendOptions) {}
+	constructor(private readonly options: ParakeetBackendOptions) {
+		this.clock = options.clock ?? systemClock;
+		this.idleUnloadMs = options.idleUnloadMs ?? DEFAULT_IDLE_UNLOAD_MS;
+		this.loadShedRatio = options.loadShedRatio ?? DEFAULT_LOAD_SHED_RATIO;
+		this.loadCheckMs = options.loadCheckMs ?? DEFAULT_LOAD_CHECK_MS;
+	}
+
+	/** Whether the model is currently resident. Exposed for tests and diagnostics. */
+	get modelLoaded(): boolean {
+		return this.model_ !== undefined;
+	}
+
+	/**
+	 * Drop the model and free its memory. Called on the idle timer, when the
+	 * machine is busy, and on shutdown.
+	 */
+	unload(): void {
+		this.cancelIdleTimers();
+		const model = this.model_;
+		this.model_ = undefined;
+		try {
+			model?.dispose();
+		} catch {
+			// Disposing a model that is already gone is not worth reporting.
+		}
+	}
+
+	async dispose(): Promise<void> {
+		this.unload();
+	}
+
+	private cancelIdleTimers(): void {
+		if (this.idleTimer) {
+			this.clock.clearTimeout(this.idleTimer);
+			this.idleTimer = undefined;
+		}
+		if (this.loadTimer) {
+			this.clock.clearTimeout(this.loadTimer);
+			this.loadTimer = undefined;
+		}
+	}
+
+	/** A session has ended: hold the model briefly, then let it go. */
+	private scheduleIdleUnload(): void {
+		this.cancelIdleTimers();
+		if (!this.model_) return;
+		if (this.idleUnloadMs <= 0) {
+			this.unload();
+			return;
+		}
+		this.idleTimer = this.clock.setTimeout(() => this.unload(), this.idleUnloadMs);
+		this.loadTimer = this.clock.setTimeout(() => this.checkSystemLoad(), this.loadCheckMs);
+	}
+
+	/** Give the memory back early rather than waiting out the whole idle window. */
+	private checkSystemLoad(): void {
+		this.loadTimer = undefined;
+		if (!this.model_) return;
+		if (this.currentLoad() >= this.loadShedRatio) {
+			this.unload();
+			return;
+		}
+		this.loadTimer = this.clock.setTimeout(() => this.checkSystemLoad(), this.loadCheckMs);
+	}
+
+	private currentLoad(): number {
+		try {
+			return this.options.systemLoad?.() ?? defaultSystemLoad();
+		} catch {
+			return 0;
+		}
+	}
+
+	private loadModel(path: string): Promise<CppModel> {
+		return this.options.loadModel?.(path) ?? defaultLoadModel(path);
+	}
 
 	private resolvePath(): Promise<string | undefined> {
 		this.resolution ??= resolveParakeetModelPath(this.options.modelPath);
@@ -324,13 +448,13 @@ export class ParakeetBackend implements VoiceBackend {
 		const path = await this.resolvePath();
 		if (!path) return undefined;
 
+		// A session is starting, so a pending unload must not fire underneath it.
+		this.cancelIdleTimers();
+
 		let model: CppModel;
 		try {
 			if (!this.model_) {
-				const { TranscribeModel } = (await loadTranscribeCpp()) as unknown as {
-					TranscribeModel: { load(path: string): Promise<CppModel> };
-				};
-				this.model_ = await TranscribeModel.load(path);
+				this.model_ = await this.loadModel(path);
 			}
 			model = this.model_;
 		} catch (error) {
@@ -361,7 +485,7 @@ export class ParakeetBackend implements VoiceBackend {
 				commitPolicy: "stable_prefix" as const,
 				stablePrefixAgreementN: STABLE_PREFIX_AGREEMENT,
 			});
-			return new ParakeetStream(stream, session, emit);
+			return new ParakeetStream(stream, session, emit, () => this.scheduleIdleUnload());
 		} catch (error) {
 			emit({
 				type: "error",

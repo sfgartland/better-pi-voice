@@ -266,7 +266,7 @@ export class VoiceController {
 		// interim. A slightly provisional word beats a silently dropped sentence.
 		this.promoteInterim();
 		this.emitTranscript();
-		this.reportEmpty();
+		await this.reportEmpty();
 		this.finishSession();
 	}
 
@@ -382,7 +382,10 @@ export class VoiceController {
 		if (!stream || generation !== this.generation) return;
 		const unsent = this.audio.unsent();
 		if (!unsent) return;
-		for (const frame of this.coalescer.push(unsent)) this.feed(stream, frame);
+		// Everything captured before the backend was ready is already complete
+		// audio, not a frame in progress, so send it now rather than holding it
+		// for the next live chunk to top up the coalescer.
+		this.feedBuffer(stream, unsent);
 		this.audio.markAllSent();
 	}
 
@@ -536,7 +539,7 @@ export class VoiceController {
 	 * Nothing was transcribed. Say why, specifically: "no audio" and "no
 	 * network" and "you said nothing" need different fixes.
 	 */
-	private reportEmpty(): void {
+	private async reportEmpty(): Promise<void> {
 		if (this.transcript.trim().length > 0) return;
 		if (this.clock.now() - this.sessionStartedAt < 2000) return;
 
@@ -548,10 +551,31 @@ export class VoiceController {
 			return;
 		}
 		if (!this.streamWasConnected) {
-			this.deps.hooks?.onError?.("Voice connection failed. Check your network and try again.", "connection_failed");
+			const why = await this.explainConnectionFailure();
+			this.deps.hooks?.onError?.(
+				`Voice connection failed.${why ? ` ${why}.` : " Check your network and try again."}`,
+				"connection_failed",
+			);
 			return;
 		}
 		this.deps.hooks?.onError?.("No speech detected.", "no_speech");
+	}
+
+	/**
+	 * Ask the backend what went wrong. Reported instead of a bare "check your
+	 * network", which is unactionable when the real cause is a rejected key.
+	 */
+	private async explainConnectionFailure(): Promise<string> {
+		const probe = this.deps.backend.probe;
+		if (!probe) return "";
+		try {
+			const detail = (await probe()).trim();
+			if (!detail) return "";
+			this.debug(`probe: ${detail}`);
+			return detail.replace(/\.$/, "");
+		} catch {
+			return "";
+		}
 	}
 
 	// --- failures and breaker ---------------------------------------------

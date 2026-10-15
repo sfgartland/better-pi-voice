@@ -275,6 +275,87 @@ describe("keepalive", () => {
 	});
 });
 
+describe("probe", () => {
+	async function withFetch(handler: () => Promise<Response> | Response) {
+		const original = globalThis.fetch;
+		const calls: Array<{ url: string; headers: Record<string, string> }> = [];
+		globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+			calls.push({
+				url: input instanceof Request ? input.url : String(input),
+				headers: Object.fromEntries(new Headers(init?.headers).entries()),
+			});
+			return handler();
+		}) as typeof fetch;
+		try {
+			return { calls, restore: () => (globalThis.fetch = original) };
+		} catch (error) {
+			globalThis.fetch = original;
+			throw error;
+		}
+	}
+
+	test("checks the REST endpoint derived from the websocket URL, with the key", async () => {
+		const stub = await withFetch(() => new Response("[]", { status: 200 }));
+		try {
+			const backend = new DeepgramBackend({ apiKey: "k-123" });
+			expect(await backend.probe()).toContain("reachable");
+			expect(stub.calls[0]!.url).toBe("https://api.deepgram.com/v1/projects");
+			expect(stub.calls[0]!.headers.authorization).toBe("Token k-123");
+		} finally {
+			stub.restore();
+		}
+	});
+
+	test("names a rejected key, which a close code alone cannot tell you", async () => {
+		const stub = await withFetch(() => new Response("unauthorized", { status: 401 }));
+		try {
+			expect(await new DeepgramBackend({ apiKey: "bad" }).probe()).toBe("Deepgram rejected the API key");
+		} finally {
+			stub.restore();
+		}
+	});
+
+	test("reports an unreachable network distinctly from a bad key", async () => {
+		const stub = await withFetch(() => {
+			throw new Error("getaddrinfo ENOTFOUND api.deepgram.com");
+		});
+		try {
+			const result = await new DeepgramBackend({ apiKey: "k" }).probe();
+			expect(result).toContain("could not reach Deepgram");
+			expect(result).toContain("ENOTFOUND");
+		} finally {
+			stub.restore();
+		}
+	});
+
+	test("reports a server side status", async () => {
+		const stub = await withFetch(() => new Response("boom", { status: 503 }));
+		try {
+			expect(await new DeepgramBackend({ apiKey: "k" }).probe()).toBe("Deepgram returned HTTP 503");
+		} finally {
+			stub.restore();
+		}
+	});
+
+	test("says so when there is no key to test", async () => {
+		expect(await new DeepgramBackend({ apiKey: undefined }).probe()).toBe("no API key is configured");
+	});
+
+	test("follows a regional endpoint", async () => {
+		const stub = await withFetch(() => new Response("[]", { status: 200 }));
+		try {
+			const backend = new DeepgramBackend({
+				apiKey: "k",
+				baseUrl: "wss://api.eu.deepgram.com/v1/listen",
+			});
+			await backend.probe();
+			expect(stub.calls[0]!.url).toBe("https://api.eu.deepgram.com/v1/projects");
+		} finally {
+			stub.restore();
+		}
+	});
+});
+
 describe("updateKeyterms", () => {
 	test("sends a Configure message with the whole replacement list", async () => {
 		const { stream, socket } = await started();
@@ -300,6 +381,30 @@ describe("unexpected closes", () => {
 		expect(events).toEqual([
 			{ type: "error", message: "Voice connection closed unexpectedly (code 1006).", code: "ws_closed_1006" },
 		]);
+	});
+
+	test("includes the underlying cause when the error event carries one", async () => {
+		const { socket, events } = await started();
+		socket.open();
+		// This is the only detail available when a network call fails, and a bare
+		// "connection error" is unactionable without it.
+		socket.onerror?.({ message: "getaddrinfo ENOTFOUND api.deepgram.com" });
+
+		expect(events).toEqual([
+			{
+				type: "error",
+				message: "Voice stream connection error: getaddrinfo ENOTFOUND api.deepgram.com",
+				code: "ws_error",
+			},
+		]);
+	});
+
+	test("accepts a nested error message", async () => {
+		const { socket, events } = await started();
+		socket.open();
+		socket.onerror?.({ error: { message: "socket hang up" } });
+
+		expect(events[0]).toMatchObject({ message: "Voice stream connection error: socket hang up" });
 	});
 
 	test("treats a normal close as expected", async () => {

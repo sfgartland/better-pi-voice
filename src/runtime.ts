@@ -20,7 +20,7 @@ const LEVEL_FRAME_MS = 60;
 
 export type Runtime = {
 	toggle(): void;
-	dispose(): void;
+	dispose(): Promise<void>;
 	get state(): VoiceState;
 	/** Backend and model, for status and for /voice. */
 	readonly label: string;
@@ -30,7 +30,12 @@ type Logger = { debug(message: string): void; notify(message: string, level?: "i
 
 export function createBackend(settings: VoiceSettings): VoiceBackend {
 	if (settings.backend === "parakeet") {
-		return new ParakeetBackend({ modelPath: settings.parakeet.modelPath, language: settings.language });
+		return new ParakeetBackend({
+			modelPath: settings.parakeet.modelPath,
+			language: settings.language,
+			idleUnloadMs: settings.parakeet.idleUnloadMs,
+			loadShedRatio: settings.parakeet.loadShedRatio,
+		});
 	}
 	return new DeepgramBackend({
 		apiKey: resolveDeepgramApiKey(settings),
@@ -154,6 +159,13 @@ export async function createRuntime(
 		logger.notify(availability.reason, "warning");
 	}
 
+	// Probe the microphone now rather than on the first keypress, so the first
+	// recording starts immediately and a missing device is reported up front.
+	const captureAvailability = await capture.checkAvailability();
+	if (!captureAvailability.available && captureAvailability.reason) {
+		logger.notify(captureAvailability.reason, "warning");
+	}
+
 	// Show which backend and model are active before anything is recorded.
 	ctx.ui.setStatus(STATUS_KEY, statusText("idle", label));
 
@@ -176,9 +188,10 @@ export async function createRuntime(
 
 	return {
 		toggle: () => controller.press(),
-		dispose: () => {
+		dispose: async () => {
 			unsubscribeInput?.();
 			controller.dispose();
+			await backend.dispose?.();
 			ctx.ui.setWidget(LEVEL_WIDGET_KEY, undefined);
 			ctx.ui.setStatus(STATUS_KEY, undefined);
 		},
