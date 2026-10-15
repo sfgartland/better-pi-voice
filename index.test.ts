@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
-import { createFakeCtx, createFakePi, isolateAgentDir } from "../../../test-support/fake-pi.ts";
+import { createFakeCtx, createFakePi, isolateAgentDir } from "./test-support/fake-pi.ts";
 
 // Must run before the extension module is imported: it resolves its settings
 // path at load time.

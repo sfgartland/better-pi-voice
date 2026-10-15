@@ -1,4 +1,4 @@
-# @sfgartland/pi-add-better-pi-voice
+# @sfgartland/better-pi-voice
 
 Streaming voice input for pi. Hold a key, talk, and the words land in the editor —
 in the right spelling, including the jargon and filenames generic speech
@@ -49,7 +49,8 @@ with it.
 ## Install
 
 ```bash
-pi install /path/to/pi-extensions/packages/add/pi-add-better-pi-voice
+pi install /path/to/better-pi-voice        # from a local checkout
+pi install npm:@sfgartland/better-pi-voice      # once published
 ```
 
 Then set a Deepgram key. Either export it:

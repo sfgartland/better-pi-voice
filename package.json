@@ -1,5 +1,5 @@
 {
-	"name": "@sfgartland/pi-add-better-pi-voice",
+	"name": "@sfgartland/better-pi-voice",
 	"version": "0.1.0",
 	"description": "Streaming voice input for pi: Deepgram (nova-3, repo-aware keyterms) or local Parakeet, with Claude-Code-style recovery so speech is never lost.",
 	"license": "MIT",
@@ -10,12 +10,11 @@
 	},
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/sfgartland/pi-extensions",
-		"directory": "packages/add/pi-add-better-pi-voice"
+		"url": "https://github.com/sfgartland/better-pi-voice"
 	},
-	"homepage": "https://github.com/sfgartland/pi-add-better-pi-voice#readme",
+	"homepage": "https://github.com/sfgartland/better-pi-voice#readme",
 	"bugs": {
-		"url": "https://github.com/sfgartland/pi-extensions/issues"
+		"url": "https://github.com/sfgartland/better-pi-voice/issues"
 	},
 	"keywords": [
 		"pi-package",
@@ -40,6 +39,14 @@
 	},
 	"optionalDependencies": {
 		"transcribe-cpp": "*"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.5.15",
+		"@earendil-works/pi-ai": "^1.0.1",
+		"@earendil-works/pi-coding-agent": "^1.0.1",
+		"@earendil-works/pi-tui": "^1.0.1",
+		"@types/bun": "^1.3.14",
+		"typescript": "^7.0.2"
 	},
 	"pi": {
 		"extensions": [
