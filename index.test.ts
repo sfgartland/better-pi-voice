@@ -1,5 +1,5 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFakeCtx, createFakePi, isolateAgentDir } from "./test-support/fake-pi.ts";
@@ -7,7 +7,7 @@ import { createFakeCtx, createFakePi, isolateAgentDir } from "./test-support/fak
 // Must run before the extension module is imported: it resolves its settings
 // path at load time.
 const { root } = isolateAgentDir("better-pi-voice");
-const { DEFAULT_SETTINGS, readSettings, settingsPath, writeSettings } = await import("./src/settings.ts");
+const { DEFAULT_SETTINGS, keyFilePath, readSettings, settingsPath, writeSettings } = await import("./src/settings.ts");
 const { default: factory } = await import("./index.ts");
 
 // Stand in for a configured install, so backend labels name a real model.
@@ -28,7 +28,7 @@ afterAll(() => {
 });
 
 /** The fake command context, extended with the bits only voice needs. */
-function makeCtx(options: { select?: string[]; hasUI?: boolean } = {}) {
+function makeCtx(options: { select?: string[]; input?: string[]; hasUI?: boolean } = {}) {
 	const base = createFakeCtx(options);
 	let reloaded = 0;
 	const editor = { text: "" };
@@ -68,6 +68,7 @@ function addCachedModel(repo: string, file: string): string {
 // Each test starts from the same configured install, so order cannot leak state.
 beforeEach(async () => {
 	rmSync(HUB, { recursive: true, force: true });
+	rmSync(keyFilePath(), { force: true });
 	delete process.env.DEEPGRAM_API_KEY;
 	await writeSettings({
 		...DEFAULT_SETTINGS,
@@ -333,6 +334,16 @@ describe("/voice set", () => {
 		expect(reloads()).toBe(1);
 	});
 
+	test("sets the key env name and key file", async () => {
+		const pi = await load();
+
+		await pi.run("voice", "set apiKeyEnv MY_DG_KEY", makeCtx().ctx);
+		expect((await readSettings()).settings.deepgram.apiKeyEnv).toBe("MY_DG_KEY");
+
+		await pi.run("voice", "set apiKeyFile /tmp/some.env", makeCtx().ctx);
+		expect((await readSettings()).settings.deepgram.apiKeyFile).toBe("/tmp/some.env");
+	});
+
 	test("a bare /voice set explains the keys instead of throwing", async () => {
 		const pi = await load();
 		const { ctx, notifications } = makeCtx();
@@ -412,6 +423,89 @@ describe("/voice model", () => {
 		await pi.run("voice", "model", ctx);
 
 		expect(notifications[0]!.message).toContain("No Parakeet models");
+		expect(reloads()).toBe(0);
+	});
+});
+
+describe("/voice key", () => {
+	function dotenv(contents: string): string {
+		const file = join(tmpdir(), `better-pi-voice-dotenv-${String(process.pid)}-${String(Date.now())}.env`);
+		writeFileSync(file, contents);
+		return file;
+	}
+
+	test("points at a dotenv file that has a key, and switches to Deepgram", async () => {
+		const file = dotenv("deepgram_key=file-key\n");
+		const pi = await load();
+		const { ctx, notifications, reloads } = makeCtx();
+
+		await pi.run("voice", `key ${file}`, ctx);
+
+		const { settings } = await readSettings();
+		expect(settings.deepgram.apiKeyFile).toBe(file);
+		expect(settings.backend).toBe("deepgram");
+		expect(notifications[0]!.message).toContain("Deepgram key found");
+		expect(reloads()).toBe(1);
+		rmSync(file, { force: true });
+	});
+
+	test("rejects a file with no key in it", async () => {
+		const file = dotenv("SOMETHING_ELSE=1\n");
+		const pi = await load();
+		const { ctx, notifications, reloads } = makeCtx();
+
+		await pi.run("voice", `key ${file}`, ctx);
+
+		expect(notifications[0]!.message).toContain("No DEEPGRAM_API_KEY");
+		expect((await readSettings()).settings.deepgram.apiKeyFile).toBeNull();
+		expect(reloads()).toBe(0);
+		rmSync(file, { force: true });
+	});
+
+	test("rejects a path that does not exist", async () => {
+		const pi = await load();
+		const { ctx, notifications, reloads } = makeCtx();
+
+		await pi.run("voice", "key /nope/none.env", ctx);
+
+		expect(notifications[0]!.message).toContain("No file");
+		expect(reloads()).toBe(0);
+	});
+
+	test("prompts for a key and stores it in a 0600 file, not in settings", async () => {
+		const pi = await load();
+		const { ctx, notifications, reloads } = makeCtx({ input: ["dg-secret"] });
+
+		await pi.run("voice", "key", ctx);
+
+		const { settings } = await readSettings();
+		expect(settings.deepgram.apiKeyFile).toBe(keyFilePath());
+		expect(settings.deepgram.apiKey).toBeNull();
+		expect(settings.backend).toBe("deepgram");
+		expect(readFileSync(keyFilePath(), "utf8")).toContain("dg-secret");
+		expect(statSync(keyFilePath()).mode & 0o777).toBe(0o600);
+		expect(notifications[0]!.message).toContain("stored at");
+		expect(reloads()).toBe(1);
+	});
+
+	test("--inline stores the key in settings", async () => {
+		const pi = await load();
+		const { ctx, reloads } = makeCtx({ input: ["dg-inline"] });
+
+		await pi.run("voice", "key --inline", ctx);
+
+		expect((await readSettings()).settings.deepgram.apiKey).toBe("dg-inline");
+		expect(reloads()).toBe(1);
+	});
+
+	test("a cancelled prompt changes nothing", async () => {
+		const pi = await load();
+		const { ctx, notifications, reloads } = makeCtx({ input: [] });
+
+		await pi.run("voice", "key", ctx);
+
+		expect((await readSettings()).settings.deepgram.apiKeyFile).toBeNull();
+		expect(notifications).toEqual([]);
 		expect(reloads()).toBe(0);
 	});
 });

@@ -369,7 +369,7 @@ export class DeepgramBackend implements VoiceBackend {
 			return {
 				available: false,
 				reason:
-					"Deepgram API key not found. Set it in the environment variable named by deepgram.apiKeyEnv in better-pi-voice.json.",
+					"Deepgram API key not found. Run /voice key <path-to-dotenv>, or set the environment variable named by deepgram.apiKeyEnv in better-pi-voice.json.",
 			};
 		}
 		return { available: true };

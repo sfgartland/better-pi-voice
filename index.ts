@@ -5,6 +5,7 @@
  * cheap and a broken voice setup cannot stop pi from starting.
  */
 
+import { existsSync, readFileSync } from "node:fs";
 import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { KeyId } from "@earendil-works/pi-tui";
@@ -13,11 +14,14 @@ import { ensureFirstRunSettings } from "./src/first-run.ts";
 import { backendLabel, createRuntime, type Runtime } from "./src/runtime.ts";
 import {
 	applySetting,
+	keyFilePath,
+	parseDotenv,
 	readSettings,
 	resolveDeepgramApiKey,
 	SETTABLE_KEYS,
 	settingsPath,
 	type VoiceSettings,
+	writeKeyFile,
 	writeSettings,
 } from "./src/settings.ts";
 
@@ -77,6 +81,7 @@ function describe(settings: VoiceSettings, runtime: Runtime | undefined): string
 						: `MISSING (${keyEnv})`
 			}`,
 		);
+		if (!hasKey) lines.push("  hint       /voice key <path-to-dotenv>, or /voice key to paste one");
 	}
 	return lines.join("\n");
 }
@@ -193,6 +198,72 @@ export default async function betterPiVoice(pi: ExtensionAPI): Promise<void> {
 						? ""
 						: " The backend is still deepgram; /voice backend parakeet to use it.";
 				ctx.ui.notify(`Parakeet model set to ${basename(stored)}.${backendNote} Reloading…`, "info");
+				await ctx.reload();
+				return;
+			}
+
+			if (action === "key") {
+				const { settings: current } = await readSettings();
+				const env = current.deepgram.apiKeyEnv;
+
+				if (value && value !== "--inline") {
+					// Point at an existing dotenv file. Store the path, not the secret.
+					if (!existsSync(value)) {
+						ctx.ui.notify(`No file at ${value}.`, "warning");
+						return;
+					}
+					const candidate = { ...current, deepgram: { ...current.deepgram, apiKeyFile: value, apiKey: null } };
+					let found: string | undefined;
+					try {
+						found = parseDotenv(readFileSync(value, "utf8"), env);
+					} catch {
+						found = undefined;
+					}
+					if (!found) {
+						ctx.ui.notify(`No ${env} (or a "*deepgram*" variable) found in ${value}.`, "warning");
+						return;
+					}
+					await writeSettings({ ...candidate, backend: "deepgram" });
+					ctx.ui.notify(`Deepgram key found in ${value}. Backend set to deepgram. Reloading…`, "info");
+					await ctx.reload();
+					return;
+				}
+
+				if (!ctx.hasUI) {
+					ctx.ui.notify(
+						`Add a key with /voice key <path-to-dotenv>, or put ${env} in a dotenv at ${keyFilePath()}.`,
+						"warning",
+					);
+					return;
+				}
+
+				if (value === "--inline") {
+					const entered = (
+						await ctx.ui.input(`Deepgram API key — stored in ${settingsPath()} (keep that file out of dotfiles repos)`)
+					)?.trim();
+					if (!entered) return; // cancelled
+					await writeSettings({
+						...current,
+						backend: "deepgram",
+						deepgram: { ...current.deepgram, apiKey: entered },
+					});
+					ctx.ui.notify("Deepgram key stored in settings. Backend set to deepgram. Reloading…", "info");
+					await ctx.reload();
+					return;
+				}
+
+				// No argument: take the key now and keep it in a 0600 file, never in settings.
+				const entered = (
+					await ctx.ui.input(`Deepgram API key — stored 0600 at ${keyFilePath()}, never in settings`)
+				)?.trim();
+				if (!entered) return; // cancelled
+				const path = await writeKeyFile(env, entered);
+				await writeSettings({
+					...current,
+					backend: "deepgram",
+					deepgram: { ...current.deepgram, apiKey: null, apiKeyFile: path },
+				});
+				ctx.ui.notify(`Deepgram key stored at ${path}. Backend set to deepgram. Reloading…`, "info");
 				await ctx.reload();
 				return;
 			}

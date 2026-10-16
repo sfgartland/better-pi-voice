@@ -27,6 +27,8 @@ export type VoiceSettings = {
 	language: string;
 	deepgram: {
 		apiKeyEnv: string;
+		/** Optional inline key, set only by `/voice key --inline`. Never written otherwise. */
+		apiKey: string | null;
 		/** Optional dotenv-style file to read the key from when the env var is unset. */
 		apiKeyFile: string | null;
 		model: string;
@@ -69,6 +71,7 @@ export const DEFAULT_SETTINGS: VoiceSettings = {
 	language: "en",
 	deepgram: {
 		apiKeyEnv: "DEEPGRAM_API_KEY",
+		apiKey: null,
 		apiKeyFile: null,
 		model: "nova-3",
 		smartFormat: true,
@@ -108,6 +111,23 @@ export const DEFAULT_SETTINGS: VoiceSettings = {
 
 export function settingsPath(): string {
 	return join(getAgentDir(), SETTINGS_FILENAME);
+}
+
+/**
+ * Where `/voice key` (no path) stores a pasted key: a 0600 dotenv beside the
+ * settings file, so the key never lands in the settings JSON that people sync
+ * into dotfiles repos.
+ */
+export function keyFilePath(): string {
+	return join(getAgentDir(), "better-pi-voice.key");
+}
+
+/** Write a one-variable dotenv holding the key, readable only by the user. */
+export async function writeKeyFile(envName: string, key: string): Promise<string> {
+	const path = keyFilePath();
+	await mkdir(dirname(path), { recursive: true });
+	await writeFile(path, `${envName}=${key.trim()}\n`, { encoding: "utf8", mode: 0o600 });
+	return path;
 }
 
 /**
@@ -251,6 +271,7 @@ export function parseSettings(raw: unknown): { settings: VoiceSettings; warnings
 			language: pickString(source.language, DEFAULT_SETTINGS.language, "language", warnings),
 			deepgram: {
 				apiKeyEnv: pickString(deepgram.apiKeyEnv, DEFAULT_SETTINGS.deepgram.apiKeyEnv, "deepgram.apiKeyEnv", warnings),
+				apiKey: pickNullableString(deepgram.apiKey, null, "deepgram.apiKey", warnings),
 				apiKeyFile: pickNullableString(deepgram.apiKeyFile, null, "deepgram.apiKeyFile", warnings),
 				model: pickString(deepgram.model, DEFAULT_SETTINGS.deepgram.model, "deepgram.model", warnings),
 				smartFormat: pickBoolean(
@@ -336,6 +357,8 @@ export const SETTABLE_KEYS = [
 	"chunkSeconds",
 	"silenceLevel",
 	"shortcut",
+	"apiKeyEnv",
+	"apiKeyFile",
 ] as const;
 export type SettableKey = (typeof SETTABLE_KEYS)[number];
 
@@ -352,6 +375,8 @@ const FIELD_FOR_KEY = new Map<SettableKey, string>([
 	["chunkSeconds", "parakeet.chunkSeconds"],
 	["silenceLevel", "parakeet.silenceLevel"],
 	["shortcut", "shortcut"],
+	["apiKeyEnv", "deepgram.apiKeyEnv"],
+	["apiKeyFile", "deepgram.apiKeyFile"],
 ]);
 
 function parseBooleanText(value: string): boolean | undefined {
@@ -396,6 +421,10 @@ function withSetting(settings: VoiceSettings, key: SettableKey, value: string): 
 		case "shortcut":
 			// Validated by parseSettings (pickShortcut), like the enum fields.
 			return { ...settings, shortcut: value.trim() };
+		case "apiKeyEnv":
+			return { ...settings, deepgram: { ...settings.deepgram, apiKeyEnv: value.trim() } };
+		case "apiKeyFile":
+			return { ...settings, deepgram: { ...settings.deepgram, apiKeyFile: value.trim() || null } };
 		case "submitOnStop": {
 			const parsed = parseBooleanText(value);
 			return parsed === undefined ? "submitOnStop must be true or false." : { ...settings, submitOnStop: parsed };
@@ -475,6 +504,11 @@ export function resolveDeepgramApiKey(settings: VoiceSettings): string | undefin
 	// `process.env` inherits from Object.prototype, so a settings file that names
 	// `toString` or `__proto__` would otherwise yield a function, not a key.
 	if (typeof raw === "string" && raw.trim().length > 0) return raw.trim();
+
+	// An inline key is an explicit opt-in (`/voice key --inline`); it still loses
+	// to the environment so a shell export can override it.
+	const inline = settings.deepgram.apiKey?.trim();
+	if (inline) return inline;
 
 	const file = settings.deepgram.apiKeyFile;
 	if (!file) return undefined;

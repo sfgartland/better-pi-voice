@@ -145,6 +145,32 @@ describe("resolveDeepgramApiKey", () => {
 		}
 	});
 
+	test("uses an inline key when the environment is unset", () => {
+		const settings = {
+			...DEFAULT_SETTINGS,
+			deepgram: {
+				...DEFAULT_SETTINGS.deepgram,
+				apiKeyEnv: "DEFINITELY_NOT_SET_KEY",
+				apiKey: "inline-key",
+				apiKeyFile: null,
+			},
+		};
+		expect(resolveDeepgramApiKey(settings)).toBe("inline-key");
+	});
+
+	test("the environment overrides an inline key", () => {
+		process.env.TEST_DG_INLINE = "from-env";
+		try {
+			const settings = {
+				...DEFAULT_SETTINGS,
+				deepgram: { ...DEFAULT_SETTINGS.deepgram, apiKeyEnv: "TEST_DG_INLINE", apiKey: "inline-key" },
+			};
+			expect(resolveDeepgramApiKey(settings)).toBe("from-env");
+		} finally {
+			delete process.env.TEST_DG_INLINE;
+		}
+	});
+
 	test("does not treat a prototype member named by apiKeyEnv as a key", () => {
 		const settings = {
 			...DEFAULT_SETTINGS,

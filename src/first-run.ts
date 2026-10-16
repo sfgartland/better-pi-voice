@@ -77,7 +77,7 @@ export async function ensureFirstRunSettings(): Promise<FirstRunOutcome | undefi
 			wrote: false,
 			message:
 				`better-pi-voice is not configured: no ${DEFAULT_SETTINGS.deepgram.apiKeyEnv} and no local Parakeet ` +
-				"model under the Hugging Face cache. Set the key, or run /voice model <path>.",
+				"model under the Hugging Face cache. Run /voice key <path-to-dotenv> to add a key, or /voice model <path>.",
 		};
 	}
 

@@ -53,20 +53,24 @@ pi install /path/to/better-pi-voice        # from a local checkout
 pi install npm:@sfgartland/better-pi-voice      # once published
 ```
 
-Then set a Deepgram key. Either export it:
+Then add a Deepgram key. The easiest way is `/voice key`:
+
+- `/voice key <path-to-dotenv>` — use a key from an existing dotenv file (it checks one is
+  actually in there first), then switches to Deepgram.
+- `/voice key` — paste the key at the prompt; it is written to `~/.pi/agent/better-pi-voice.key`
+  with `0600` permissions and referenced from the settings, so the secret never lands in
+  `better-pi-voice.json` (which is the file people sync into dotfiles repos).
+- `/voice key --inline` — store the key in `better-pi-voice.json` itself. Explicit opt-in:
+  only do this if that file is not tracked by git.
+
+You can also export it, which overrides everything the settings point at:
 
 ```bash
-export DEEPGRAM_API_KEY=...
+DEEPGRAM_API_KEY=... pi
 ```
 
-or point at an existing dotenv file, which avoids having to export it in every shell:
-
-```jsonc
-// ~/.pi/agent/better-pi-voice.json
-{ "deepgram": { "apiKeyFile": "/path/to/some/project/.env" } }
-```
-
-The key is never written into the settings file.
+or set `deepgram.apiKeyFile` to any dotenv by hand. Precedence is: environment variable,
+then `deepgram.apiKey` (inline), then `deepgram.apiKeyFile`.
 
 ## Use
 
@@ -90,8 +94,11 @@ Commands:
 - `/voice backend deepgram|parakeet` — switch directly, then reload
 - `/voice model` — pick a local GGUF already in the Hugging Face cache, then reload
 - `/voice model /path/to/model.gguf` — use a specific model file
+- `/voice key <path-to-dotenv>` — use a key from a dotenv file, then switch to Deepgram
+- `/voice key` — paste a key; stored `0600` in `~/.pi/agent/better-pi-voice.key`
+- `/voice key --inline` — store the key in the settings file (explicit opt-in)
 - `/voice set <key> <value>` — set `backend`, `model`, `mode`, `language`, `correction`,
-  `submitOnStop`, `chunkSeconds`, `silenceLevel` or `shortcut`, then reload
+  `submitOnStop`, `chunkSeconds`, `silenceLevel`, `shortcut`, `apiKeyEnv` or `apiKeyFile`, then reload
 - `/voice-keyterms` — list custom terms
 - `/voice-keyterms add <term>` / `remove <term>`
 
@@ -258,6 +265,7 @@ malformed falls back to a default and warns rather than breaking the microphone.
   "language": "en",
   "deepgram": {
     "apiKeyEnv": "DEEPGRAM_API_KEY",
+    "apiKey": null,                   // inline key, only written by /voice key --inline
     "apiKeyFile": null,               // dotenv file, used when the env var is unset
     "model": "nova-3",
     "smartFormat": true,
