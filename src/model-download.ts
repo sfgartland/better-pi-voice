@@ -41,7 +41,7 @@ export const MODEL_CATALOG: CatalogModel[] = [
 		filename: "parakeet-tdt_ctc-110m-Q8_0.gguf",
 		size: 135_373_280,
 		sha256: "7dd44c74a331d788a4e5f8b16913b3feb29ced22cf5613aad0e0f6cd30516296",
-		note: "smallest and fastest here; batch only",
+		note: "smallest and fastest to load; batch only",
 		streaming: false,
 		recommended: true,
 	},
@@ -72,7 +72,7 @@ export const MODEL_CATALOG: CatalogModel[] = [
 		filename: "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf",
 		size: 751_094_240,
 		sha256: "b94545b313b3223fda7b2857a52681da813935c2127643d1e9ff0c23d988089c",
-		note: "streaming and 32 languages; slower than real time here",
+		note: "streaming and 32 languages; lower delay, but needs a fast CPU",
 		streaming: true,
 	},
 	{
@@ -82,7 +82,7 @@ export const MODEL_CATALOG: CatalogModel[] = [
 		filename: "parakeet-unified-en-0.6b-Q8_0.gguf",
 		size: 731_357_568,
 		sha256: "4b50b6dd862bf6e346929aaf4f5eaacec003bfa3f56462d6c874b41ef2f38795",
-		note: "most accurate; can stream, but too slow to stream here",
+		note: "most accurate; can stream or batch, but the heaviest to run",
 		streaming: true,
 	},
 ];

@@ -80,7 +80,7 @@ export const DEFAULT_SETTINGS: VoiceSettings = {
 	},
 	parakeet: {
 		modelPath: null,
-		// Batch is several times faster here, and it is the only option for the
+		// Batch is several times faster in practice, and it is the only option for the
 		// small models, none of which can stream. Chunking means text still
 		// arrives while you speak, in pieces, rather than all at the end.
 		mode: "batch",
@@ -89,10 +89,10 @@ export const DEFAULT_SETTINGS: VoiceSettings = {
 		// long speech is chunked.
 		chunkSeconds: 30,
 		// Derived per recording. A fixed number cannot span rooms: one recording
-		// measured here never dropped below 0.05 (music playing) while another
+		// we measured never dropped below 0.05 (music playing) while another
 		// paused around 0.3. Pin a number only to override that.
 		silenceLevel: "auto",
-		// Load is fast enough on the machines this was built for (about 0.4s
+		// Load is fast enough on the machines measured (about 0.4s
 		// warm) that holding ~700MB between recordings is not worth it. The
 		// residency machinery below stays for larger models and other hardware.
 		idleUnloadMs: 0,

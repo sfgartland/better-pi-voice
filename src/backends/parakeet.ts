@@ -205,7 +205,7 @@ async function findGgufs(dir: string, depth = 0): Promise<string[]> {
 }
 
 /**
- * Parakeet GGUFs already on this machine: the Hugging Face Hub cache plus the
+ * Parakeet GGUFs already on the system: the Hugging Face Hub cache plus the
  * flat cache the setup wizard downloads into. This lists what is on disk; the
  * wizard is what offers downloads.
  */
@@ -245,7 +245,7 @@ export async function availableModels(): Promise<AvailableModel[]> {
  * Loaded models are held for this long after the last session ends.
  *
  * Zero by default: a warm reload measures about 0.4s for the model this was
- * built for, which is cheaper than holding several hundred megabytes between
+ * measured, which is cheaper than holding several hundred megabytes between
  * recordings. Raise it for larger models, where a reload costs enough to be
  * worth the memory. `DEFAULT_LOAD_SHED_RATIO` only has anything to do while
  * this is non-zero, because at zero the memory is already back.
@@ -270,7 +270,7 @@ export type ParakeetBackendOptions = {
 	modelPath: string | null;
 	language?: string | undefined;
 	/**
-	 * "batch" transcribes in pieces (much faster here, and the only option for
+	 * "batch" transcribes in pieces (much faster in practice, and the only option for
 	 * models that cannot stream); "streaming" decodes continuously.
 	 */
 	mode?: "streaming" | "batch" | undefined;
@@ -530,7 +530,7 @@ class ParakeetBatchStream implements VoiceStream {
 	 * Where a pause starts, derived from this recording rather than from a fixed
 	 * number.
 	 *
-	 * A fixed threshold cannot work across rooms: measured here, one recording
+	 * A fixed threshold cannot work across rooms: in our test recordings, one recording
 	 * never dropped below 0.05 (music playing) while another paused around 0.3.
 	 * So the floor and the speech level are taken from the buffer's own level
 	 * distribution and a pause is anything in the lowest part of that range.
@@ -548,7 +548,7 @@ class ParakeetBatchStream implements VoiceStream {
 		const sorted = [...levels].sort((a, b) => a - b);
 		// The second-smallest level, not a low percentile: pauses are brief, so a
 		// 10th percentile often IS speech. Two silent chunks in forty still yields a
-		// zero floor here, whereas the percentile reported 1.00 and found no pause
+		// zero floor, whereas the percentile reported 1.00 and found no pause
 		// at all. Taking the second rather than the smallest ignores one stray click.
 		const noise = sorted[1]!;
 		const speech = sorted[Math.floor(0.75 * (sorted.length - 1))]!;

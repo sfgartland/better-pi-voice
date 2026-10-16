@@ -112,7 +112,7 @@ async function isWsl(): Promise<boolean> {
 	}
 }
 
-/** The package manager command that would install SoX here, if we can tell. */
+/** The package manager command that would install SoX on this system, if we can tell. */
 async function soxInstallCommand(): Promise<string | null> {
 	for (const [command, display] of [
 		["apt-get", "sudo apt-get install sox"],

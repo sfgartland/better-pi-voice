@@ -4,6 +4,9 @@
 **Machine:** 8-core x86_64, 15 GB RAM. `transcribe-cpp` chose the **Vulkan / Intel UHD iGPU**
 path (`backend=auto`), not CPU. The `TU: error: ...VULKAN...` line on stderr concerns a
 different render node and is harmless.
+
+**These figures belong to that one machine.** A faster or slower CPU/GPU moves the
+absolute numbers; the ordering between models should hold broadly.
 **Audio:** `/tmp/vsmoke/speech.pcm` — 6.653 s, 16 kHz mono s16le, piper-synthesised English.
 **RTF** = audio seconds ÷ wall seconds, so higher is faster; **1.0 is the real-time floor**.
 

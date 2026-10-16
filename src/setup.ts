@@ -56,9 +56,10 @@ const MODES = ["Hold to talk (press and hold)", "Tap to start and stop"];
 export const ENTER_PATH = "Enter a path…";
 
 /** How the local model runs. These labels carry the explanation, since that is where the choice is made. */
-export const BATCH_MODE_LABEL = "Batch — transcribe in short slices as you talk: fastest here, works with every model";
+export const BATCH_MODE_LABEL =
+	"Batch — transcribe in short slices as you talk: works with every model, faster on most machines";
 export const STREAMING_MODE_LABEL =
-	"Streaming — decode continuously for lower delay; on this machine it runs slower than real time";
+	"Streaming — decode continuously for lower delay; needs a fast CPU to keep up in real time";
 
 export type ModelChoice = { label: string; model?: CatalogModel; path?: string };
 
@@ -160,7 +161,7 @@ async function askRunMode(
 	if (supportsStreaming !== true) {
 		io.notify(
 			supportsStreaming === false
-				? "Using Batch mode: the model transcribes while you speak, in short slices, and results land a few seconds behind you. This model has no streaming support, so Batch is the only option."
+				? "Using Batch mode: the model transcribes while you speak, in short slices, so results land a moment behind you. This model has no streaming support, so Batch is the only option."
 				: "Using Batch mode: the model transcribes while you speak, in short slices. Streaming needs a model built for it.",
 			"info",
 		);

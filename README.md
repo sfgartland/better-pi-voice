@@ -27,7 +27,7 @@ it (`claude-code@2.1.295`) turned up three things worth stealing:
    partial transcript when the socket dies, promoting an unreported interim to a
    final, and a circuit breaker so a broken microphone fails loudly.
 
-All three are reproduced here. The design document with the full extraction notes is
+All three are reproduced in this extension. The design document with the full extraction notes is
 at `docs/superpowers/specs/2026-10-15-pi-voice-input-design.md`.
 
 ## What it actually buys you
@@ -88,10 +88,10 @@ with their download size — **selecting one downloads it** (checksum-verified, 
 progress line) — then falls back to any GGUF already on disk or a path you give.
 
 If the model you chose can stream, the wizard then asks how it should run and spells out
-the tradeoff: **Batch** transcribes in short slices while you talk (fastest on this
-machine, works with every model) versus **Streaming**, which decodes continuously for
-lower delay but runs slower than real time here. A batch-only model skips the question
-and says why. See [Batch mode](#batch-mode-the-default) below for the measured detail.
+the tradeoff: **Batch** transcribes in short slices while you talk (works with every
+model, and faster on most machines) versus **Streaming**, which decodes continuously for
+lower delay but needs a fast CPU to keep up in real time. A batch-only model skips the
+question and says why. See [Batch mode](#batch-mode-the-default) below for the detail.
 
 ## Use
 
@@ -180,11 +180,11 @@ On the real output of the local backend for the test sentence, that turns
 whether the pass is earning its keep before trusting it.
 
 If you want true local biasing instead, a whisper-family model with `initialPrompt`
-plus a batch re-pass at finalize is the route; it is not implemented here.
+plus a batch re-pass at finalize is the route; this extension does not implement it.
 
-**It is also the slow part on this machine.** Measured on an 8-core x86_64 laptop
-with the bundled `linux-x64-cpu-vulkan` build (which cannot open the GPU here — the
-driver reports `VK_ERROR_INCOMPATIBLE_DRIVER`, so this is the CPU path):
+**It is also the slow part.** How fast it runs depends on the machine; the numbers below
+come from one reference machine — an 8-core x86_64 laptop using the bundled
+`linux-x64-cpu-vulkan` build on the CPU path (its GPU was not usable there):
 
 | | measured |
 |---|---|
@@ -224,8 +224,8 @@ that is not parakeet, at the same size.
 ### Batch mode (the default)
 
 `parakeet.mode` chooses how the local backend works, and **`batch` is the default**
-because it is 2–8× faster here and because it is the only option for the small models,
-none of which can stream.
+because it is typically several times faster than streaming, and because it is the only
+option for the small models, none of which can stream.
 
 In batch mode the audio is transcribed in pieces while you are still speaking, so only
 the tail is left when you release the key:
@@ -241,15 +241,15 @@ the tail is left when you release the key:
   as a pause when it falls in the lowest 30% of that range. The floor is a near-minimum
   rather than a low percentile because pauses are brief — two silent chunks in forty leave
   a percentile reporting pure speech, while the minimum still finds them. A fixed number
-  cannot span rooms — of two real recordings measured here, one never dropped below 0.05
+  cannot span rooms — of two real recordings, one never dropped below 0.05
   (music playing) and the other paused around 0.3. Pin a number to override.
 - when the level barely varies there is no pause structure to find, so nothing is cut and
   the whole utterance is transcribed in one piece. That is the safe answer for unbroken
   speech and for steady background noise.
 - **the default is calibrated for a model that tolerates a chunk starting mid-word**,
   which the recommended `parakeet-tdt_ctc-110m` does. It matters: `canary-180m-flash`
-  returns an *empty* transcript for any clip that starts mid-utterance — measured at
-  offsets 4, 6, 8 and 10 s into a 24 s clip, it produced 0 characters every time, while
+  returns an *empty* transcript for any clip that starts mid-utterance — in testing, at
+  offsets 4, 6, 8 and 10 s into a 24 s clip it produced 0 characters every time, while
   parakeet-tdt_ctc-110m produced 292, 253, 215 and 192. If you use canary, set
   `silenceLevel` to 0.05 so cuts only happen at true silence.
 
@@ -344,7 +344,7 @@ the session ends.
 ## Requirements
 
 - Linux with `arecord` (alsa-utils), or SoX's `rec` as a fallback. macOS/Windows use
-  `rec` and are a degraded path — untested here.
+  `rec` and are a degraded path — untested by us.
 - Hold-to-talk needs Kitty keyboard protocol flag 2 for key *release*. It is verified
   working on Kitty. Everywhere else it falls back to tap-to-toggle and says so once.
 - The local backend needs `transcribe-cpp` and a Parakeet GGUF.

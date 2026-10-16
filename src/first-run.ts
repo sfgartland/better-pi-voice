@@ -23,7 +23,7 @@ import {
  * Preference order from docs/reports/2026-10-15-voice-model-benchmarks.md:
  * fastest and smallest first, and only models that survive a chunk boundary
  * (canary is ranked above the slower ones only because it is second-best on
- * speed among the models this machine measured).
+ * speed among the models measured for the benchmark report).
  */
 const MODEL_PREFERENCE = [
 	"parakeet-tdt_ctc-110m",
