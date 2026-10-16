@@ -77,36 +77,50 @@ counts are shown and used to rank the directories**, so early adoption compounds
 
 ## The actual competition (the "voice" slot is not empty)
 
-Monthly npm downloads, 2026-10-16:
+Monthly npm downloads, 2026-10-16, with **transport capabilities read from each
+published package's source** (not its blurb):
 
-| Package | Version | Downloads/mo | What it is | Has gallery image? |
-|---|---|---:|---|---|
-| `@agimon-ai/doompi-voice` | 0.0.1-alpha.129 | ~9,000 | client audio capture + host transcription for Pi agents | no |
-| `@juicesharp/rpiv-voice` | 2.13.8 | ~3,800 | local on-device Whisper (sherpa-onnx), `/voice`, no cloud, no API key | **yes** (`pi.image`) |
-| `pi-voicekit` | 0.4.2 | ~2,800 | hold-to-talk STT, **Deepgram streaming or 21 offline models**, plus TTS | no |
-| `@earendil-works/pi-voice` | 0.2.0 | ~1,722 | the official local transcription extension | no |
-| `pi-voice-stt` | 0.8.0 | ~919 | provider-agnostic (Mistral/OpenAI/Deepgram/…), file transcription | **yes** (`pi.image`) |
-| **`@sfgartland/better-pi-voice`** | — | **not published** | — | — |
+| Package | Downloads/mo | Backends | Streaming | Pause-aware chunking | Repo biasing | Recovery (replay/salvage) | Gallery image |
+|---|---:|---|---|---|---|---|---|
+| `@agimon-ai/doompi-voice` 0.0.1-alpha | ~9,000 | client capture + host STT | realtime-ish (client VAD endpointing) | client VAD endpoint | no | no | no |
+| `@juicesharp/rpiv-voice` 2.13.8 | ~3,800 | local Whisper (sherpa-onnx) | **no** (offline decode) | no | no | no | **yes** |
+| `pi-voicekit` 0.4.2 | ~2,800 | Deepgram + 21 local models | **yes** (Deepgram WS); local is batch-after-stop | local only, **at stop** | no | no | no |
+| `@earendil-works/pi-voice` 0.2.0 | ~1,722 | local (transcribe-cpp) | **yes** (streaming models) | **yes — live, Silero VAD** | no | no (avoids replay) | no |
+| `pi-voice-stt` 0.8.0 | ~919 | many cloud providers | **no** (whole-WAV POST) | no | no (LLM cleanup, off by default) | no | **yes** |
+| **`@sfgartland/better-pi-voice`** | **not published** | Deepgram + local Parakeet | **yes** (Deepgram WS; local stream or batch) | **yes — live, amplitude-based** | **yes** | **yes** | — |
+
+The important correction to an earlier draft of this doc: **streaming and pause-aware
+chunking are no longer differentiators.** `pi-voicekit` streams Deepgram, and the
+official `@earendil-works/pi-voice` 0.2.0 — published 2026-10-16, the same day as this
+doc — added live pause-aware chunking driven by Silero VAD. That one is *more*
+sophisticated than the amplitude-based heuristic here.
 
 For comparison, the `@sfgartland` family itself does 1.1k–4.5k/mo (`pi-core-subagent` 4,512;
-`pi-add-mode` 1,832; `pi-senja` 1,316). So a realistic good outcome is a few thousand
-downloads a month — and the voice niche's ceiling is in the high thousands.
+`pi-add-mode` 1,832; `pi-senja` 1,316). A realistic good outcome is a few thousand
+downloads a month; the voice niche's ceiling is in the high thousands.
 
 ### The wedge (say this, not "voice input")
 
-`pi-voicekit` already offers Deepgram **or** offline models, so that combination is not
-a differentiator. Three things are:
+Do **not** lead with streaming, "Deepgram or local", or chunking — competitors own
+those. Two things are genuinely unique, verified across all five packages:
 
-1. **Repo-aware vocabulary biasing.** Keyterms mined from the project name, the git
-   repo, touched file paths and the session, sent to Deepgram as native `keyterm`
-   prompts, plus a deterministic correction pass on the local backend. The README's
-   before/after (`sub agent` → `subagent`, `Worktree T's config` → `worktree tsconfig`)
-   is the proof. **No other pi voice extension advertises this.**
+1. **Repo-aware vocabulary biasing of the recogniser.** Keyterms mined from the
+   project name, the git repo, touched file paths and the session, sent to Deepgram as
+   native `keyterm` prompts, plus a deterministic correction pass on the local backend.
+   The README's before/after (`sub agent` → `subagent`, `Worktree T's config` →
+   `worktree tsconfig`) is the proof. Nobody else in the pi ecosystem does this —
+   `pi-voice-stt` has repo context, but it feeds an optional LLM cleanup pass that is
+   off by default and only reads the git branch, and it does not bias the recogniser.
 2. **The never-lose-a-sentence recovery layer** borrowed from Claude Code: one retry,
-   silent-drop replay, partial salvage, interim promotion, circuit breaker. Also unique
-   in this ecosystem.
-3. **Honest, measured local chunking** (pause-derived thresholds, mid-word-safe cuts)
-   with the benchmark report to back it, instead of a vague "fast and accurate" claim.
+   silent-drop **audio replay**, partial salvage, interim promotion, circuit breaker.
+   No other pi voice extension has it; the official pi-voice explicitly avoids
+   replaying a clip through a reopened stream, and `pi-voicekit`'s "recovery" is only
+   the rapid re-press UI plus download retries.
+
+The amplitude-based chunking still has a real, *honest* role: it needs no VAD model,
+so it works with any transcribe-cpp build, and its pause rules are documented with a
+regression test per failure mode. Describe it as "chunking that keeps working when
+VAD is unavailable", not as the category's only chunker.
 
 ### And the "no post-LLM cleanup" choice is a feature — frame it that way
 
