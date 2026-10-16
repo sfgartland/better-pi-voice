@@ -55,6 +55,11 @@ const SKIP = "Skip for now";
 const MODES = ["Hold to talk (press and hold)", "Tap to start and stop"];
 export const ENTER_PATH = "Enter a path…";
 
+/** How the local model runs. These labels carry the explanation, since that is where the choice is made. */
+export const BATCH_MODE_LABEL = "Batch — transcribe in short slices as you talk: fastest here, works with every model";
+export const STREAMING_MODE_LABEL =
+	"Streaming — decode continuously for lower delay; on this machine it runs slower than real time";
+
 export type ModelChoice = { label: string; model?: CatalogModel; path?: string };
 
 /** The Parakeet model menu: catalog entries (with their download size) first, then local files. */
@@ -141,6 +146,35 @@ async function askForKey(io: SetupIo, settings: VoiceSettings): Promise<VoiceSet
 	return settings;
 }
 
+/**
+ * Ask how the local model should run, and say what each choice means.
+ *
+ * Streaming is only offered for a model known to support it; a batch-only or
+ * unknown model gets Batch and a sentence saying why.
+ */
+async function askRunMode(
+	io: SetupIo,
+	settings: VoiceSettings,
+	supportsStreaming: boolean | undefined,
+): Promise<VoiceSettings | undefined> {
+	if (supportsStreaming !== true) {
+		io.notify(
+			supportsStreaming === false
+				? "Using Batch mode: the model transcribes while you speak, in short slices, and results land a few seconds behind you. This model has no streaming support, so Batch is the only option."
+				: "Using Batch mode: the model transcribes while you speak, in short slices. Streaming needs a model built for it.",
+			"info",
+		);
+		return { ...settings, parakeet: { ...settings.parakeet, mode: "batch" } };
+	}
+
+	const pick = await io.select("How should the local model run?", [BATCH_MODE_LABEL, STREAMING_MODE_LABEL]);
+	if (pick === undefined) return undefined;
+	return {
+		...settings,
+		parakeet: { ...settings.parakeet, mode: pick.startsWith("Streaming") ? "streaming" : "batch" },
+	};
+}
+
 async function askForModel(
 	io: SetupIo,
 	options: SetupOptions,
@@ -159,13 +193,17 @@ async function askForModel(
 			io.notify(applied.error, "warning");
 			return settings;
 		}
-		return applied.settings;
+		return askRunMode(io, applied.settings, undefined);
 	}
 
 	const choice = choices.find((entry) => entry.label === pick);
 	if (!choice) return settings;
 	if (choice.path) {
-		return { ...settings, parakeet: { ...settings.parakeet, modelPath: choice.path } };
+		return askRunMode(
+			io,
+			{ ...settings, parakeet: { ...settings.parakeet, modelPath: choice.path } },
+			choice.model?.streaming,
+		);
 	}
 	if (!choice.model) return settings;
 
@@ -178,7 +216,7 @@ async function askForModel(
 			const percent = total > 0 ? Math.round((downloaded / total) * 100) : 0;
 			io.progress?.(`Downloading ${model.name}… ${String(percent)}%`);
 		});
-		return { ...settings, parakeet: { ...settings.parakeet, modelPath: path } };
+		return askRunMode(io, { ...settings, parakeet: { ...settings.parakeet, modelPath: path } }, model.streaming);
 	} catch (error) {
 		io.notify(
 			`Download failed: ${error instanceof Error ? error.message : String(error)}. Re-run /voice setup; the partial download is kept and resumed.`,

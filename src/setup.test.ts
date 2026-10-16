@@ -7,7 +7,7 @@ import type { SetupIo, TryItOutcome } from "./setup.ts";
 // Must isolate before importing the settings module, which resolves pi's agent
 // dir when it writes.
 const { root } = isolateAgentDir("better-pi-voice-setup");
-const { modelChoices, runSetup } = await import("./setup.ts");
+const { modelChoices, runSetup, STREAMING_MODE_LABEL } = await import("./setup.ts");
 const { MODEL_CATALOG } = await import("./model-download.ts");
 const { DEFAULT_SETTINGS, keyFilePath, readSettings, settingsPath } = await import("./settings.ts");
 
@@ -208,5 +208,31 @@ describe("runSetup", () => {
 
 		expect(result).toBeUndefined();
 		expect(notifications.some((entry) => entry.message.includes("Download failed"))).toBe(true);
+	});
+
+	test("asks batch vs streaming for a model that can stream", async () => {
+		const nemotron = MODEL_CATALOG.find((model) => model.streaming)!;
+		const local = { label: nemotron.id, path: `/x/${nemotron.filename}` };
+		const choice = modelChoices([local]).find((entry) => entry.model?.id === nemotron.id)!;
+		const { io } = makeIo({
+			select: [PARAKEET, choice.label, STREAMING_MODE_LABEL, HOLD],
+			input: ["ctrl+alt+z"],
+		});
+
+		const result = await runSetup(io, { base: DEFAULT_SETTINGS, models: async () => [local] });
+
+		expect(result?.parakeet.mode).toBe("streaming");
+	});
+
+	test("forces batch for a model that cannot stream", async () => {
+		const base = {
+			...DEFAULT_SETTINGS,
+			parakeet: { ...DEFAULT_SETTINGS.parakeet, mode: "streaming" as const },
+		};
+		const { io } = makeIo({ select: [PARAKEET, LOCAL_MODEL_LABEL, HOLD], input: ["ctrl+alt+z"] });
+
+		const result = await runSetup(io, { base, models: async () => [MODEL] });
+
+		expect(result?.parakeet.mode).toBe("batch");
 	});
 });

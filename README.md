@@ -87,6 +87,12 @@ a dotenv file. For the local backend, the model menu lists the known GGUFs best-
 with their download size — **selecting one downloads it** (checksum-verified, with a
 progress line) — then falls back to any GGUF already on disk or a path you give.
 
+If the model you chose can stream, the wizard then asks how it should run and spells out
+the tradeoff: **Batch** transcribes in short slices while you talk (fastest on this
+machine, works with every model) versus **Streaming**, which decodes continuously for
+lower delay but runs slower than real time here. A batch-only model skips the question
+and says why. See [Batch mode](#batch-mode-the-default) below for the measured detail.
+
 ## Use
 
 The default binding is `ctrl+alt+z`; **hold it while you speak and release**. The

@@ -22,6 +22,7 @@ function model(overrides: Record<string, unknown> = {}) {
 		size: body.length,
 		sha256: sha,
 		note: "",
+		streaming: false,
 		...overrides,
 	};
 }

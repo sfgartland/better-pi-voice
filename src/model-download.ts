@@ -24,6 +24,8 @@ export type CatalogModel = {
 	sha256: string;
 	/** One line shown next to the model in the picker. */
 	note: string;
+	/** Whether transcribe-cpp can stream this model. Batch always works. */
+	streaming: boolean;
 	recommended?: boolean;
 };
 
@@ -39,7 +41,8 @@ export const MODEL_CATALOG: CatalogModel[] = [
 		filename: "parakeet-tdt_ctc-110m-Q8_0.gguf",
 		size: 135_373_280,
 		sha256: "7dd44c74a331d788a4e5f8b16913b3feb29ced22cf5613aad0e0f6cd30516296",
-		note: "smallest and fastest here, and safe to cut at pauses",
+		note: "smallest and fastest here; batch only",
+		streaming: false,
 		recommended: true,
 	},
 	{
@@ -50,6 +53,7 @@ export const MODEL_CATALOG: CatalogModel[] = [
 		size: 218_447_552,
 		sha256: "e13c7f5d0952b056a027cfffec13e3a3a134d1608babed24f983568f141e297c",
 		note: "fast batch model; en, de, es, fr",
+		streaming: false,
 	},
 	{
 		id: "parakeet-tdt-0.6b-v2",
@@ -59,6 +63,7 @@ export const MODEL_CATALOG: CatalogModel[] = [
 		size: 729_574_912,
 		sha256: "f0d0e99cebb6d3b83f1f7069b82b5d3c2e39a54545b0da039cb4bafd9c4e5caa",
 		note: "batch model, more accurate than the 110m",
+		streaming: false,
 	},
 	{
 		id: "nemotron-3.5-asr-streaming-0.6b",
@@ -67,7 +72,8 @@ export const MODEL_CATALOG: CatalogModel[] = [
 		filename: "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf",
 		size: 751_094_240,
 		sha256: "b94545b313b3223fda7b2857a52681da813935c2127643d1e9ff0c23d988089c",
-		note: "streaming, 32 languages",
+		note: "streaming and 32 languages; slower than real time here",
+		streaming: true,
 	},
 	{
 		id: "parakeet-unified-en-0.6b",
@@ -76,7 +82,8 @@ export const MODEL_CATALOG: CatalogModel[] = [
 		filename: "parakeet-unified-en-0.6b-Q8_0.gguf",
 		size: 731_357_568,
 		sha256: "4b50b6dd862bf6e346929aaf4f5eaacec003bfa3f56462d6c874b41ef2f38795",
-		note: "most accurate, but too slow to stream here",
+		note: "most accurate; can stream, but too slow to stream here",
+		streaming: true,
 	},
 ];
 
