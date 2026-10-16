@@ -79,8 +79,13 @@ through it. The wizard asks, in order: how voice should run (Deepgram cloud or l
 Parakeet), how to supply the key or which model to use, whether to hold or tap, and
 which shortcut. Then it saves, and ends with a **Try it** pane — press the shortcut,
 speak, and watch the transcript appear. Enter accepts it; Esc goes back and lets you
-change anything. Nothing is ever downloaded: models are chosen from GGUFs already on
-disk, or a path you give.
+change anything.
+
+For the key, if `DEEPGRAM_API_KEY` is already in your environment the wizard offers to
+just use it; otherwise you can paste a key (kept `0600`, never in settings) or point at
+a dotenv file. For the local backend, the model menu lists the known GGUFs best-first
+with their download size — **selecting one downloads it** (checksum-verified, with a
+progress line) — then falls back to any GGUF already on disk or a path you give.
 
 ## Use
 

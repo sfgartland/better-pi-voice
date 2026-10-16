@@ -7,7 +7,8 @@ import type { SetupIo, TryItOutcome } from "./setup.ts";
 // Must isolate before importing the settings module, which resolves pi's agent
 // dir when it writes.
 const { root } = isolateAgentDir("better-pi-voice-setup");
-const { runSetup } = await import("./setup.ts");
+const { modelChoices, runSetup } = await import("./setup.ts");
+const { MODEL_CATALOG } = await import("./model-download.ts");
 const { DEFAULT_SETTINGS, keyFilePath, readSettings, settingsPath } = await import("./settings.ts");
 
 afterAll(() => rmSync(root, { recursive: true, force: true }));
@@ -44,6 +45,8 @@ const SKIP = "Skip for now";
 const HOLD = "Hold to talk (press and hold)";
 const TAP = "Tap to start and stop";
 const MODEL = { label: "parakeet-tdt_ctc-110m-Q8_0", path: "/models/parakeet-tdt_ctc-110m-Q8_0.gguf" };
+// The exact menu label the wizard builds for a catalog model already on disk.
+const LOCAL_MODEL_LABEL = modelChoices([MODEL])[0]!.label;
 
 describe("runSetup", () => {
 	test("configures Deepgram by pasting a key, keeping it out of settings", async () => {
@@ -81,7 +84,7 @@ describe("runSetup", () => {
 	});
 
 	test("picks a local model from disk", async () => {
-		const { io } = makeIo({ select: [PARAKEET, MODEL.label, HOLD], input: ["ctrl+alt+z"] });
+		const { io } = makeIo({ select: [PARAKEET, LOCAL_MODEL_LABEL, HOLD], input: ["ctrl+alt+z"] });
 
 		const result = await runSetup(io, { base: DEFAULT_SETTINGS, models: async () => [MODEL] });
 
@@ -100,7 +103,7 @@ describe("runSetup", () => {
 	});
 
 	test("keeps the current shortcut and warns when the new one is invalid", async () => {
-		const { io, notifications } = makeIo({ select: [PARAKEET, MODEL.label, HOLD], input: ["crtl+alt+z"] });
+		const { io, notifications } = makeIo({ select: [PARAKEET, LOCAL_MODEL_LABEL, HOLD], input: ["crtl+alt+z"] });
 
 		const result = await runSetup(io, { base: DEFAULT_SETTINGS, models: async () => [MODEL] });
 
@@ -120,7 +123,7 @@ describe("runSetup", () => {
 
 	test("runs the wizard again when Try it asks for a change", async () => {
 		const { io } = makeIo({
-			select: [PARAKEET, MODEL.label, HOLD, DEEPGRAM, SKIP, TAP],
+			select: [PARAKEET, LOCAL_MODEL_LABEL, HOLD, DEEPGRAM, SKIP, TAP],
 			input: ["ctrl+alt+z", "ctrl+shift+v"],
 			tryIt: ["change", "done"],
 		});
@@ -130,5 +133,64 @@ describe("runSetup", () => {
 		expect(result?.backend).toBe("deepgram");
 		expect(result?.mode).toBe("tap");
 		expect(result?.shortcut).toBe("ctrl+shift+v");
+	});
+
+	test("offers the key already present in the environment", async () => {
+		process.env.DEEPGRAM_API_KEY = "from-env";
+		try {
+			const { io } = makeIo({
+				select: [DEEPGRAM, "Use the key already in DEEPGRAM_API_KEY", HOLD],
+				input: ["ctrl+alt+z"],
+			});
+
+			const result = await runSetup(io, { base: DEFAULT_SETTINGS });
+
+			expect(result?.backend).toBe("deepgram");
+			expect(result?.deepgram.apiKeyFile).toBeNull();
+			expect(result?.deepgram.apiKey).toBeNull();
+		} finally {
+			delete process.env.DEEPGRAM_API_KEY;
+		}
+	});
+
+	test("downloads a catalog model the user selects", async () => {
+		const choice = modelChoices([])[0]!; // the recommended model, not on disk
+		let progressCalls = 0;
+		const { io } = makeIo({ select: [PARAKEET, choice.label, HOLD], input: ["ctrl+alt+z"] });
+		io.progress = () => {
+			progressCalls++;
+		};
+
+		const result = await runSetup(io, {
+			base: DEFAULT_SETTINGS,
+			models: async () => [],
+			download: async (_model, onProgress) => {
+				onProgress(50, 100);
+				return "/downloaded/parakeet.gguf";
+			},
+		});
+
+		expect(result?.parakeet.modelPath).toBe("/downloaded/parakeet.gguf");
+		expect(progressCalls).toBeGreaterThan(0);
+	});
+
+	test("uses a catalog model already on disk without downloading", async () => {
+		const catalog = MODEL_CATALOG[0]!;
+		const local = { label: catalog.id, path: `/x/${catalog.filename}` };
+		const choice = modelChoices([local])[0]!;
+		let downloads = 0;
+		const { io } = makeIo({ select: [PARAKEET, choice.label, HOLD], input: ["ctrl+alt+z"] });
+
+		const result = await runSetup(io, {
+			base: DEFAULT_SETTINGS,
+			models: async () => [local],
+			download: async () => {
+				downloads++;
+				return "/nope";
+			},
+		});
+
+		expect(result?.parakeet.modelPath).toBe(`/x/${catalog.filename}`);
+		expect(downloads).toBe(0);
 	});
 });

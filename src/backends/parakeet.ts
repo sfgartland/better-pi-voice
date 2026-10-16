@@ -20,6 +20,7 @@ import { pathToFileURL } from "node:url";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { type Clock, systemClock, type TimerHandle } from "../clock.ts";
 import { float32ToS16le, levelFromS16le, s16leToFloat32 } from "../formats.ts";
+import { modelsDir } from "../model-download.ts";
 import type { FinalizeOutcome, StartOptions, VoiceBackend, VoiceEvent, VoiceStream } from "../types.ts";
 
 type StreamText = { full: string; committed: string; tentative: string };
@@ -204,8 +205,9 @@ async function findGgufs(dir: string, depth = 0): Promise<string[]> {
 }
 
 /**
- * Parakeet GGUFs already on this machine, under the Hugging Face Hub cache.
- * Downloads are deliberately not offered: this is a picker for what can run now.
+ * Parakeet GGUFs already on this machine: the Hugging Face Hub cache plus the
+ * flat cache the setup wizard downloads into. This lists what is on disk; the
+ * wizard is what offers downloads.
  */
 export async function availableModels(): Promise<AvailableModel[]> {
 	const byLabel = new Map<string, AvailableModel>();
@@ -223,6 +225,18 @@ export async function availableModels(): Promise<AvailableModel[]> {
 				if (!byLabel.has(label)) byLabel.set(label, { label, path });
 			}
 		}
+	}
+	// Models downloaded by the setup wizard live in a flat cache of our own.
+	try {
+		for (const entry of await readdir(modelsDir(), { withFileTypes: true })) {
+			if (!/\.gguf$/i.test(entry.name)) continue;
+			const path = join(modelsDir(), entry.name);
+			if (!isModelFile(path)) continue;
+			const label = entry.name.replace(/\.gguf$/i, "");
+			if (!byLabel.has(label)) byLabel.set(label, { label, path });
+		}
+	} catch {
+		// Nothing downloaded yet.
 	}
 	return [...byLabel.values()].sort((a, b) => a.label.localeCompare(b.label));
 }

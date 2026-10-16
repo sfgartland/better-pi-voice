@@ -128,6 +128,8 @@ export default async function betterPiVoice(pi: ExtensionAPI): Promise<void> {
 		input: (title, placeholder) => ctx.ui.input(title, placeholder),
 		confirm: (title, message) => ctx.ui.confirm(title, message),
 		notify: (message, level) => ctx.ui.notify(message, level ?? "info"),
+		progress: (message) => ctx.ui.setWidget("voice-setup-status", [message], { placement: "aboveEditor" }),
+		clearProgress: () => ctx.ui.setWidget("voice-setup-status", undefined),
 		tryIt: (next) => runTryIt(ctx, next),
 	});
 	// Apply the wizard's result. The command path can reload; the shortcut path
