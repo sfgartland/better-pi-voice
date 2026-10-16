@@ -1,44 +1,38 @@
 # Publish runbook — `@sfgartland/better-pi-voice` 0.1.0
 
 **Date:** 2026-10-16
-**State:** everything that can be done without credentials is done. The package is
-clean, tested, and packaged. One step needs an account login — marked **[BLOCKED]**.
+**State:** **published.** This file is now a record, not a to-do.
 
-Verified now:
+| Item | Status |
+|---|---|
+| npm | `@sfgartland/better-pi-voice@0.1.0` live — <https://www.npmjs.com/package/@sfgartland/better-pi-voice> |
+| GitHub | live — <https://github.com/sfgartland/better-pi-voice> |
+| `BubblePtr/awesome-pi` | **PR #60** open (`README.md` + `README.en.md`) |
+| `thevibeworks/awesome-pi-agent` | **PR #16** open |
+| `piindex.dev` | mirrors `awesome-pi`, so PR #60 covers it |
+| `shaftoe/awesome-pi-coding-agent` | auto-crawl from npm — picks it up on the next daily run |
+| `pi.dev/packages/@sfgartland/better-pi-voice` | not indexed yet; the gallery runs on a schedule |
+| social preview image | set by hand in repo settings (no CLI) |
+
+Verified:
 
 ```
-npm run check          → 303 pass, tsc clean, biome clean
-npm pack               → 65 kB tarball, 24 files (tests excluded)
-npm publish --dry-run  → @sfgartland/better-pi-voice@0.1.0, public access
+npm view      → @sfgartland/better-pi-voice@0.1.0
+npm run check → 303 pass, tsc clean, biome clean
+npm pack      → 65 kB tarball, 24 files (tests excluded)
 ```
 
----
-
-## Blocker — npm is not logged in
-
-```
-$ npm whoami
-npm error code ENEEDAUTH
-```
-
-There is no `~/.npmrc`, so nothing is authenticated. Fix, then publish:
+The npm account has 2FA, so publishing opens the web-auth flow. For the next release:
 
 ```bash
-npm login          # log in as: sfgartland
-npm whoami         # should print: sfgartland
-npm publish --access public
-npm view @sfgartland/better-pi-voice version
+npm version patch && git push --follow-tags && npm publish --access public
 ```
-
-`@sfgartland` is a **user scope**: npm lets an account publish `@<its-username>/…`
-without creating an organization first. If npm asks for an org, create one named
-`sfgartland` (free for public packages).
 
 ## GitHub — done
 
 The repo is live at <https://github.com/sfgartland/better-pi-voice> (public), pushed
-from this working tree, with topics applied. After the npm publish, point the repo
-homepage at the gallery page:
+from this working tree, with topics applied and the homepage pointed at the gallery
+page:
 
 ```bash
 gh repo edit sfgartland/better-pi-voice \
