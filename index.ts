@@ -157,10 +157,18 @@ export default async function betterPiVoice(pi: ExtensionAPI): Promise<void> {
 		if (settingUp) return;
 		settingUp = true;
 		try {
+			// The session runtime's raw-input listener runs ahead of any focused pane
+			// and consumes the shortcut, so it must come down while the wizard (and
+			// the Try it pane) owns the keyboard.
+			await runtime?.dispose();
+			runtime = undefined;
+			runtimePromise = undefined;
+
 			const { settings: current } = await readSettings();
 			const result = await runSetup(setupIo(ctx), { base: current });
 			if (result === undefined) {
 				ctx.ui.notify("Setup cancelled. Run /voice setup any time.", "info");
+				await ensureRuntime(ctx);
 				return;
 			}
 			await finishSetup(ctx, result);

@@ -33,7 +33,7 @@ export class TryItPane implements Component {
 		const filled = Math.max(0, Math.min(width, Math.round(this.level * width)));
 		const lines = [
 			"Try it — speak to confirm your setup",
-			`  press ${this.shortcut} to start, then again to stop`,
+			`  press ${this.shortcut} (or Space) to start, then again to stop`,
 			`  state     ${this.state}`,
 			`  level     ${"#".repeat(filled)}`,
 		];
@@ -52,7 +52,9 @@ export class TryItPane implements Component {
 			this.done("change");
 			return;
 		}
-		if (!matchesKey(data, this.shortcut as KeyId)) return;
+		// A plain Space always reaches the focused pane, even if the configured
+		// shortcut is intercepted somewhere upstream.
+		if (!matchesKey(data, this.shortcut as KeyId) && data !== " ") return;
 		if (isKeyRelease(data)) this.controller.release();
 		else if (isKeyRepeat(data)) this.controller.repeat();
 		else this.controller.press();
