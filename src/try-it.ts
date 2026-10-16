@@ -92,6 +92,9 @@ export async function runTryIt(ctx: ExtensionContext, settings: VoiceSettings): 
 
 	const backend = createBackend(settings);
 	const capture = new SystemCapture();
+	const availability = await backend
+		.checkAvailability()
+		.catch(() => ({ available: true, reason: undefined as string | undefined }));
 	let pane: TryItPane | undefined;
 
 	// Tap semantics inside the pane: one key toggles, so it works whether or not
@@ -115,6 +118,7 @@ export async function runTryIt(ctx: ExtensionContext, settings: VoiceSettings): 
 	try {
 		return await ctx.ui.custom<TryItOutcome>((tui, _theme, _keybindings, done) => {
 			pane = new TryItPane(tui, done, settings.shortcut, controller);
+			if (!availability.available && availability.reason) pane.setError(availability.reason);
 			return pane;
 		});
 	} finally {

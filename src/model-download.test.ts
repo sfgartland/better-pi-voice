@@ -1,6 +1,6 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isolateAgentDir } from "../test-support/fake-pi.ts";
 
@@ -46,6 +46,22 @@ describe("downloadModel", () => {
 		expect(existsSync(path)).toBe(true);
 		expect(statSync(path).size).toBe(body.length);
 		expect(progress.at(-1)).toBe(body.length);
+	});
+
+	test("resumes a partial download with a Range request", async () => {
+		const half = Math.floor(body.length / 2);
+		mkdirSync(modelsDir(), { recursive: true });
+		writeFileSync(join(modelsDir(), "test-model-Q8_0.gguf.part"), body.subarray(0, half));
+		let rangeHeader: string | null = null;
+		const stub = (async (_url: string, init?: RequestInit) => {
+			rangeHeader = new Headers(init?.headers).get("range");
+			return new Response(body.subarray(half), { status: 206 });
+		}) as unknown as typeof fetch;
+
+		const path = await downloadModel(model(), { fetch: stub });
+
+		expect(rangeHeader as string | null).toBe(`bytes=${String(half)}-`);
+		expect(readFileSync(path)).toEqual(body);
 	});
 
 	test("rejects a checksum mismatch and leaves nothing behind", async () => {

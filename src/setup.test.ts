@@ -193,4 +193,20 @@ describe("runSetup", () => {
 		expect(result?.parakeet.modelPath).toBe(`/x/${catalog.filename}`);
 		expect(downloads).toBe(0);
 	});
+
+	test("aborts setup when a download fails, saving no half-config", async () => {
+		const choice = modelChoices([])[0]!;
+		const { io, notifications } = makeIo({ select: [PARAKEET, choice.label] });
+
+		const result = await runSetup(io, {
+			base: DEFAULT_SETTINGS,
+			models: async () => [],
+			download: async () => {
+				throw new Error("network died");
+			},
+		});
+
+		expect(result).toBeUndefined();
+		expect(notifications.some((entry) => entry.message.includes("Download failed"))).toBe(true);
+	});
 });

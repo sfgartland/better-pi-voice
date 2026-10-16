@@ -8,7 +8,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { createWriteStream, statSync } from "node:fs";
+import { createReadStream, createWriteStream, statSync } from "node:fs";
 import { mkdir, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -123,27 +123,60 @@ export async function downloadModel(model: CatalogModel, options: DownloadOption
 	await mkdir(modelsDir(), { recursive: true });
 	const partial = `${target}.part`;
 	const url = `https://huggingface.co/${model.repository}/resolve/main/${model.filename}`;
-	const response = await fetchImpl(url, { signal: options.signal });
+
+	// Resume a previous attempt rather than starting over.
+	let startAt = 0;
+	try {
+		startAt = statSync(partial).size;
+	} catch {
+		startAt = 0;
+	}
+	if (startAt > model.size) startAt = 0; // an oversized partial is not trusted
+	if (startAt === model.size) {
+		const hash = createHash("sha256");
+		for await (const chunk of createReadStream(partial)) hash.update(chunk);
+		if (!model.sha256 || hash.digest("hex") === model.sha256) {
+			await rename(partial, target);
+			options.onProgress?.(model.size, model.size);
+			return target;
+		}
+		await rm(partial, { force: true });
+		startAt = 0;
+	}
+
+	const headers: Record<string, string> = startAt > 0 ? { Range: `bytes=${String(startAt)}-` } : {};
+	const response = await fetchImpl(url, { signal: options.signal, headers });
 	if (!response.ok || !response.body) {
 		throw new Error(`Could not download ${model.name} (HTTP ${String(response.status)})`);
 	}
+	// 206 means the server honoured the Range and we append; anything else restarts.
+	const append = startAt > 0 && response.status === 206;
 
-	const total = Number(response.headers.get("content-length")) || model.size;
+	// The checksum covers the whole file, so hash the kept prefix before appending.
 	const hash = createHash("sha256");
 	let downloaded = 0;
+	if (append) {
+		for await (const chunk of createReadStream(partial)) {
+			hash.update(chunk);
+			downloaded += chunk.length;
+		}
+	}
+	options.onProgress?.(downloaded, model.size);
+
 	const meter = new Transform({
 		transform(chunk: Buffer, _encoding, callback) {
 			hash.update(chunk);
 			downloaded += chunk.length;
-			options.onProgress?.(downloaded, total);
+			options.onProgress?.(downloaded, model.size);
 			callback(null, chunk);
 		},
 	});
 
+	// A dropped connection leaves the `.part` for the next attempt, so no cleanup here.
 	await pipeline(
 		Readable.fromWeb(response.body as unknown as Parameters<typeof Readable.fromWeb>[0]),
 		meter,
-		createWriteStream(partial),
+		createWriteStream(partial, append ? { flags: "a" } : {}),
 	);
 
 	if (model.sha256 && hash.digest("hex") !== model.sha256) {

@@ -311,6 +311,17 @@ describe("recovery: early retry", () => {
 		expect(h.backend.streams[1]!.bytesReceived).toBe(3200);
 	});
 
+	test("reports the backend's availability reason when a stream cannot start", async () => {
+		const h = makeHarness();
+		h.backend.failToConnect = 1;
+		h.backend.availability = { available: false, reason: "No Parakeet model found." };
+
+		h.controller.press();
+		await flush();
+
+		expect(h.errors).toContainEqual({ message: "No Parakeet model found.", code: "connect_failed" });
+	});
+
 	test("does not retry a second time", async () => {
 		const h = makeHarness({}, { earlyRetryDelayMs: 250 });
 		h.backend.plans = [

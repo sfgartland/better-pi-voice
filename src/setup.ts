@@ -180,8 +180,12 @@ async function askForModel(
 		});
 		return { ...settings, parakeet: { ...settings.parakeet, modelPath: path } };
 	} catch (error) {
-		io.notify(`Download failed: ${error instanceof Error ? error.message : String(error)}`, "error");
-		return settings;
+		io.notify(
+			`Download failed: ${error instanceof Error ? error.message : String(error)}. Re-run /voice setup; the partial download is kept and resumed.`,
+			"error",
+		);
+		// Abort rather than save a configuration with no usable model.
+		return undefined;
 	} finally {
 		io.clearProgress?.();
 	}

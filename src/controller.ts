@@ -212,7 +212,15 @@ export class VoiceController {
 		const stream = await this.openStream(generation);
 		if (generation !== this.generation) return;
 		if (!stream) {
-			this.fail("Could not connect to the voice service.", "connect_failed", { recordFailure: true });
+			// Ask the backend why, so a local setup says "no model" rather than
+			// "could not connect".
+			const availability = await this.deps.backend
+				.checkAvailability()
+				.catch(() => ({ available: true, reason: undefined as string | undefined }));
+			if (generation !== this.generation) return;
+			this.fail(availability.reason ?? "Could not connect to the voice service.", "connect_failed", {
+				recordFailure: true,
+			});
 			return;
 		}
 		this.flushUnsentAudio(generation);
