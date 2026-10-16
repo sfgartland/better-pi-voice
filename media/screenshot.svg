@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" font-family="DejaVu Sans Mono, monospace">
+  <title>better-pi-voice — the same sentence transcribed without keyterms (sub agent, Worktree T's config) and with them (subagent, worktree tsconfig)</title>
+  <rect width="1280" height="640" fill="#0b0e14"/>
+  <rect x="0.5" y="0.5" width="1279" height="639" fill="none" stroke="#1f242d"/>
+
+  <!-- header -->
+  <text x="64" y="86" font-size="44" font-weight="bold" fill="#e6edf3">better-pi-voice</text>
+  <text x="64" y="124" font-size="20" fill="#8b949e">Streaming voice input for pi — biased with your repository&#8217;s vocabulary</text>
+  <rect x="1012" y="66" width="204" height="40" rx="20" fill="#161b22" stroke="#30363d"/>
+  <text x="1114" y="92" font-size="16" fill="#c9d1d9" text-anchor="middle">hold ctrl+alt+z</text>
+
+  <!-- without keyterms -->
+  <rect x="64" y="168" width="1152" height="150" rx="12" fill="#11151c" stroke="#2a1f1a"/>
+  <text x="92" y="202" font-size="16" fill="#f0883e" letter-spacing="2">WITHOUT KEYTERMS</text>
+  <text x="92" y="244" font-size="23" fill="#c9d1d9">&#8230; so the <tspan fill="#f85149">sub agent</tspan> can use the <tspan fill="#f85149">Worktree</tspan></text>
+  <text x="92" y="278" font-size="23" fill="#c9d1d9"><tspan fill="#f85149">T&#8217;s config</tspan>, then check the <tspan fill="#f85149">Marginalia</tspan> OAuth webhook.</text>
+
+  <!-- with keyterms -->
+  <rect x="64" y="340" width="1152" height="150" rx="12" fill="#0f1712" stroke="#1f3a26"/>
+  <text x="92" y="374" font-size="16" fill="#3fb950" letter-spacing="2">WITH KEYTERMS</text>
+  <text x="92" y="416" font-size="23" fill="#c9d1d9">&#8230; so the <tspan fill="#3fb950">subagent</tspan> can use the <tspan fill="#3fb950">worktree</tspan></text>
+  <text x="92" y="450" font-size="23" fill="#c9d1d9"><tspan fill="#3fb950">tsconfig</tspan>, then check the <tspan fill="#3fb950">marginalia</tspan> OAuth webhook.</text>
+
+  <!-- footer -->
+  <rect x="64" y="540" width="470" height="48" rx="10" fill="#161b22" stroke="#30363d"/>
+  <text x="88" y="571" font-size="19" fill="#7ee787">$</text>
+  <text x="104" y="571" font-size="19" fill="#c9d1d9">pi install npm:@sfgartland/better-pi-voice</text>
+  <text x="1216" y="560" font-size="16" fill="#8b949e" text-anchor="end">Deepgram nova-3 &#183; local Parakeet</text>
+  <text x="1216" y="586" font-size="16" fill="#8b949e" text-anchor="end">Claude-Code-style recovery &#183; MIT</text>
+</svg>

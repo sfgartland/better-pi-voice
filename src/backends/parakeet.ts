@@ -1,11 +1,13 @@
 /**
  * Local backend: Parakeet via transcribe-cpp.
  *
- * The honest limitation: Parakeet cannot be vocabulary-biased. transcribe-cpp's
- * `StreamOptions` carries no prompt field, and `initialPrompt` exists only in
- * `WhisperRunOptions` — the whisper family is a run-slot (batch) extension, not
- * a stream-slot one. So this backend reports `biasing: "none"` and the
- * controller applies the conservative correction pass instead.
+ * The honest limitation: Parakeet cannot be vocabulary-biased. transcribe-cpp
+ * 0.4.0 does expose `vocabulary` and `prompt` on its run and stream options, but
+ * only for models that advertise the matching feature, and the Parakeet GGUFs
+ * advertise neither: loading `parakeet-tdt_ctc-110m-Q8_0.gguf` reports
+ * `supports("vocabulary") === false` and `supports("context_prompt") === false`.
+ * So this backend reports `biasing: "none"` and the controller applies the
+ * conservative correction pass instead.
  *
  * What it does share with the cloud path is the architecture: real streaming,
  * `commitPolicy: "stable_prefix"` so committed text is genuinely append-only,

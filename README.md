@@ -184,9 +184,10 @@ limit. A comma-joined keyterm list is accepted by Deepgram and silently boosts
 
 ## The local backend, honestly
 
-**Parakeet cannot be vocabulary-biased.** `transcribe-cpp`'s stream options carry no
-prompt field, and `initialPrompt` exists only in `WhisperRunOptions` — the whisper
-family is a batch (run-slot) extension, not a streaming one. So locally you get live
+**Parakeet cannot be vocabulary-biased.** `transcribe-cpp` 0.4.0 does have a
+`vocabulary` input, but only for models that advertise `supports("vocabulary")`, and
+the Parakeet GGUFs do not — loading `parakeet-tdt_ctc-110m`, the recommended model,
+returns `false` for both `vocabulary` and `context_prompt`. So locally you get live
 interims *or* native biasing, not both.
 
 This extension takes interims, and makes up the difference with a deliberately dumb

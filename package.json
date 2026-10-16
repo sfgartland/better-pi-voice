@@ -25,11 +25,16 @@
 		"speech-to-text",
 		"deepgram",
 		"parakeet",
-		"keyterms"
+		"hold-to-talk",
+		"keyterms",
+		"coding-agent",
+		"cli"
 	],
 	"files": [
 		"index.ts",
 		"src/",
+		"!src/**/*.test.ts",
+		"!src/testing/",
 		"README.md",
 		"LICENSE"
 	],
@@ -38,7 +43,7 @@
 		"@earendil-works/pi-tui": "*"
 	},
 	"optionalDependencies": {
-		"transcribe-cpp": "*"
+		"transcribe-cpp": "^0.4.0"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.5.15",
@@ -51,7 +56,8 @@
 	"pi": {
 		"extensions": [
 			"./index.ts"
-		]
+		],
+		"image": "https://raw.githubusercontent.com/sfgartland/better-pi-voice/main/media/screenshot.png"
 	},
 	"scripts": {
 		"typecheck": "tsc --noEmit",
