@@ -510,6 +510,45 @@ describe("/voice key", () => {
 	});
 });
 
+describe("guided setup", () => {
+	test("/voice setup walks the wizard and writes settings", async () => {
+		const pi = await load();
+		const { ctx, reloads } = makeCtx({
+			select: ["Local Parakeet — private, runs a model on disk", "Enter a path…", "Tap to start and stop"],
+			input: [baselineModel, "ctrl+alt+z"],
+		});
+
+		await pi.run("voice", "setup", ctx);
+
+		const { settings } = await readSettings();
+		expect(settings.backend).toBe("parakeet");
+		expect(settings.parakeet.modelPath).toBe(baselineModel);
+		expect(settings.mode).toBe("tap");
+		expect(reloads()).toBe(1);
+	});
+
+	test("pressing the shortcut on a fresh install starts setup instead of recording", async () => {
+		rmSync(settingsPath(), { force: true });
+		const pi = await load();
+		const { ctx, reloads } = makeCtx({
+			select: ["Local Parakeet — private, runs a model on disk", "Enter a path…", "Hold to talk (press and hold)"],
+			input: [baselineModel, "ctrl+alt+z"],
+		});
+
+		// session_start builds the runtime and registers the shortcut, as at launch.
+		await pi.emit("session_start", {}, ctx);
+		const shortcut = [...pi.shortcuts.values()].at(-1)!;
+		await shortcut.handler(ctx as never);
+		// The shortcut handler launches setup without awaiting it.
+		await new Promise((resolve) => setTimeout(resolve, 25));
+
+		const { settings } = await readSettings();
+		expect(settings.backend).toBe("parakeet");
+		expect(settings.parakeet.modelPath).toBe(baselineModel);
+		expect(reloads()).toBe(1);
+	});
+});
+
 describe("first run", () => {
 	test("configures itself and tells the user which key to hold", async () => {
 		rmSync(settingsPath(), { force: true });

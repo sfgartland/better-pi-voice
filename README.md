@@ -72,6 +72,16 @@ DEEPGRAM_API_KEY=... pi
 or set `deepgram.apiKeyFile` to any dotenv by hand. Precedence is: environment variable,
 then `deepgram.apiKey` (inline), then `deepgram.apiKeyFile`.
 
+## Guided setup
+
+Run `/voice setup`, or just press the shortcut on a fresh install and it walks you
+through it. The wizard asks, in order: how voice should run (Deepgram cloud or local
+Parakeet), how to supply the key or which model to use, whether to hold or tap, and
+which shortcut. Then it saves, and ends with a **Try it** pane — press the shortcut,
+speak, and watch the transcript appear. Enter accepts it; Esc goes back and lets you
+change anything. Nothing is ever downloaded: models are chosen from GGUFs already on
+disk, or a path you give.
+
 ## Use
 
 The default binding is `ctrl+alt+z`; **hold it while you speak and release**. The
@@ -90,6 +100,7 @@ A hard cap applies in both modes so a stuck key cannot leave the microphone open
 Commands:
 
 - `/voice` — backend, model, mode, shortcut, keyterm count, whether the key is visible, state
+- `/voice setup` — guided setup (backend, key/model, mode, shortcut, then a live Try it)
 - `/voice backend` — pick a backend from a menu
 - `/voice backend deepgram|parakeet` — switch directly, then reload
 - `/voice model` — pick a local GGUF already in the Hugging Face cache, then reload

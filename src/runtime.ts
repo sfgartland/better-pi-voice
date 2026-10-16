@@ -2,6 +2,7 @@
  * Wiring: pi's extension API on one side, the controller on the other.
  */
 
+import { existsSync } from "node:fs";
 import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, isKeyRepeat, isKittyProtocolActive, type KeyId, matchesKey } from "@earendil-works/pi-tui";
@@ -11,7 +12,7 @@ import type { Capture } from "./capture.ts";
 import { SystemCapture } from "./capture.ts";
 import { VoiceController, type VoiceState } from "./controller.ts";
 import { collectKeytermSets, filePathsFromBranch, type KeytermSet } from "./keyterms/index.ts";
-import { resolveDeepgramApiKey, type VoiceSettings } from "./settings.ts";
+import { resolveDeepgramApiKey, settingsPath, type VoiceSettings } from "./settings.ts";
 import type { VoiceBackend } from "./types.ts";
 import { EditorSink, LEVEL_WIDGET_KEY, renderLevelBar, STATUS_KEY, statusText } from "./ui.ts";
 
@@ -84,6 +85,7 @@ export async function createRuntime(
 	ctx: ExtensionContext,
 	settings: VoiceSettings,
 	debugEnabled: boolean,
+	options: { requestSetup?: (() => void) | undefined } = {},
 ): Promise<Runtime> {
 	const logger: Logger = {
 		debug: (message) => {
@@ -196,6 +198,12 @@ export async function createRuntime(
 			const isRepeat = isKeyRepeat(data);
 			if (!isRelease && !isRepeat && !matchesKey(data, settings.shortcut as KeyId)) return undefined;
 			if (!matchesKey(data, settings.shortcut as KeyId)) return undefined;
+			// First use on a fresh install: walk them through setup instead of
+			// recording nothing.
+			if (!existsSync(settingsPath())) {
+				options.requestSetup?.();
+				return { consume: true };
+			}
 			if (isRelease) controller.release();
 			else if (isRepeat) controller.repeat();
 			else controller.press();
@@ -209,7 +217,12 @@ export async function createRuntime(
 		pi.registerShortcut(settings.shortcut as KeyId, {
 			description: "Start or stop voice input",
 			handler: () => {
-				if (!runtimeDisposed) controller.press();
+				if (runtimeDisposed) return;
+				if (!existsSync(settingsPath())) {
+					options.requestSetup?.();
+					return;
+				}
+				controller.press();
 			},
 		});
 		if (!warnedAboutRelease) {

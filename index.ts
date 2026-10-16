@@ -24,6 +24,8 @@ import {
 	writeKeyFile,
 	writeSettings,
 } from "./src/settings.ts";
+import { runSetup, type SetupIo } from "./src/setup.ts";
+import { runTryIt } from "./src/try-it.ts";
 
 const BACKENDS = ["deepgram", "parakeet"] as const;
 type BackendId = (typeof BACKENDS)[number];
@@ -97,7 +99,9 @@ export default async function betterPiVoice(pi: ExtensionAPI): Promise<void> {
 	const ensureRuntime = async (ctx: ExtensionContext): Promise<Runtime | undefined> => {
 		if (disposed) return undefined;
 		if (runtime) return runtime;
-		runtimePromise ??= readSettings().then(({ settings: fresh }) => createRuntime(pi, ctx, fresh, false));
+		runtimePromise ??= readSettings().then(({ settings: fresh }) =>
+			createRuntime(pi, ctx, fresh, false, { requestSetup: () => void startSetup(ctx) }),
+		);
 		let created: Runtime;
 		try {
 			created = await runtimePromise;
@@ -117,13 +121,64 @@ export default async function betterPiVoice(pi: ExtensionAPI): Promise<void> {
 		return runtime;
 	};
 
+	// Guided setup: `/voice setup`, or the first shortcut press with no settings.
+	let settingUp = false;
+	const setupIo = (ctx: ExtensionContext): SetupIo => ({
+		select: (title, options) => ctx.ui.select(title, options),
+		input: (title, placeholder) => ctx.ui.input(title, placeholder),
+		confirm: (title, message) => ctx.ui.confirm(title, message),
+		notify: (message, level) => ctx.ui.notify(message, level ?? "info"),
+		tryIt: (next) => runTryIt(ctx, next),
+	});
+	// Apply the wizard's result. The command path can reload; the shortcut path
+	// cannot, so it rebuilds the runtime and asks for /reload if the binding moved.
+	const finishSetup = async (ctx: ExtensionContext, result: VoiceSettings): Promise<void> => {
+		const reload = (ctx as unknown as { reload?: () => Promise<void> }).reload;
+		if (typeof reload === "function") {
+			ctx.ui.notify(`Voice set up: ${backendLabel(result)}. Reloading…`, "info");
+			await reload.call(ctx);
+			return;
+		}
+		const bindingChanged = result.shortcut !== settings.shortcut || result.mode !== settings.mode;
+		await runtime?.dispose();
+		runtime = undefined;
+		runtimePromise = undefined;
+		await ensureRuntime(ctx);
+		ctx.ui.notify(
+			bindingChanged
+				? `Voice set up: ${backendLabel(result)}. Run /reload, then ${result.shortcut} to talk.`
+				: `Voice set up: ${backendLabel(result)}. Press ${result.shortcut} to talk.`,
+			"info",
+		);
+	};
+	const startSetup = async (ctx: ExtensionContext): Promise<void> => {
+		if (settingUp) return;
+		settingUp = true;
+		try {
+			const { settings: current } = await readSettings();
+			const result = await runSetup(setupIo(ctx), { base: current });
+			if (result === undefined) {
+				ctx.ui.notify("Setup cancelled. Run /voice setup any time.", "info");
+				return;
+			}
+			await finishSetup(ctx, result);
+		} finally {
+			settingUp = false;
+		}
+	};
+
 	pi.registerCommand("voice", {
-		description: "Voice input status and settings: /voice backend|model|set",
+		description: "Voice input status and setup: /voice setup|backend|model|key|set",
 		handler: async (args, ctx) => {
 			// pi's declared type says `args: string`, but a bare command invocation
 			// passes nothing at all, so this must tolerate undefined.
 			const [action, ...rest] = (args ?? "").trim().split(/\s+/).filter(Boolean);
 			const value = rest.join(" ").trim();
+
+			if (action === "setup") {
+				await startSetup(ctx);
+				return;
+			}
 
 			if (action === "backend") {
 				let target = value;
@@ -320,6 +375,10 @@ export default async function betterPiVoice(pi: ExtensionAPI): Promise<void> {
 		pi.registerShortcut(settings.shortcut as KeyId, {
 			description: "Start or stop voice input",
 			handler: async (ctx) => {
+				if (!existsSync(settingsPath())) {
+					await startSetup(ctx);
+					return;
+				}
 				const active = await ensureRuntime(ctx);
 				active?.toggle();
 			},
@@ -332,8 +391,19 @@ export default async function betterPiVoice(pi: ExtensionAPI): Promise<void> {
 		disposed = false;
 		runtimePromise = undefined;
 		runtime = undefined;
-		const firstRun = await ensureFirstRunSettings();
-		if (firstRun) ctx.ui.notify(firstRun.message, firstRun.wrote ? "info" : "warning");
+		if (!existsSync(settingsPath())) {
+			if (ctx.mode === "tui") {
+				// Do not block startup with the wizard; the first shortcut press or
+				// /voice setup runs it.
+				ctx.ui.notify(
+					"better-pi-voice is not set up yet. Run /voice setup, or press the shortcut and it will walk you through it.",
+					"info",
+				);
+			} else {
+				const firstRun = await ensureFirstRunSettings();
+				if (firstRun) ctx.ui.notify(firstRun.message, firstRun.wrote ? "info" : "warning");
+			}
+		}
 		await ensureRuntime(ctx);
 	});
 
