@@ -26,6 +26,9 @@ export {
 } from "./sanitize.ts";
 export { SEED_KEYTERMS } from "./seed.ts";
 
+/** Seed terms lowercased, so a mined term that collides with one can be spotted. */
+const SEED_LOWER = new Set(SEED_KEYTERMS.map((term) => term.toLowerCase()));
+
 export type CollectOptions = MineInput & {
 	/** Terms the user configured by hand. Highest priority. */
 	userTerms?: readonly string[] | undefined;
@@ -61,7 +64,12 @@ export function collectKeytermSets(options: CollectOptions = {}): KeytermSet {
 	const mined = mineKeyterms(options);
 	const biasOrder = options.useSeed !== false ? [...user, ...SEED_KEYTERMS, ...mined] : [...user, ...mined];
 	const bias = sanitizeKeyterms(biasOrder, { maxTerms: options.maxTerms });
-	const correct = sanitizeKeyterms([...user, ...mined], { maxTerms: options.maxTerms });
+	// A mined term that collides with the seed jargon (a file named `settings.ts`,
+	// say) is still only an ordinary English word. It may bias the recogniser, but
+	// fuzzy repair must not aim at it — the seed is excluded from correction for
+	// exactly that reason. User terms are explicit, so they are left alone.
+	const correctable = mined.filter((term) => !SEED_LOWER.has(term.toLowerCase()));
+	const correct = sanitizeKeyterms([...user, ...correctable], { maxTerms: options.maxTerms });
 	const cap = options.maxTerms ?? DEFAULT_MAX_TERMS;
 	// Something was actually dropped, and the budget is what dropped it.
 	return { bias, correct, truncated: bias.length >= cap && biasOrder.length > bias.length };

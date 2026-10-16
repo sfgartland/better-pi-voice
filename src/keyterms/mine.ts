@@ -6,7 +6,7 @@
  * what makes recognition of jargon and filenames work.
  */
 
-import { basename } from "node:path";
+import { basename, dirname } from "node:path";
 import { tokenizeLabel } from "./sanitize.ts";
 
 /** Tools whose arguments name a file the user cares about. */
@@ -104,6 +104,44 @@ function stem(path: string): string {
 }
 
 /**
+ * Stems that name a document rather than a thing.
+ *
+ * A file called `SKILL.md` (or `README.md`, `INDEX.md`, …) is a convention. Its
+ * stem is a generic English word, not vocabulary, and mining it is actively
+ * harmful: the correction pass then rewrites real words one edit away from it
+ * (`still`, `spill`, `skull` and `swill` all became `SKILL`). For these names the
+ * parent directory is the informative one — `…/skills/brainstorming/SKILL.md` is
+ * about brainstorming.
+ */
+const GENERIC_STEMS = new Set([
+	"skill",
+	"readme",
+	"index",
+	"license",
+	"licence",
+	"changelog",
+	"contributing",
+	"copying",
+	"notice",
+	"authors",
+	"todo",
+	"main",
+	"package",
+	"setup",
+]);
+
+/** The terms one file path contributes: usually its stem, else its parent directory. */
+function termsFromPath(path: string): string[] {
+	if (!GENERIC_STEMS.has(stem(path).toLowerCase())) return tokenizeLabel(stem(path));
+
+	const parent = basename(dirname(path));
+	// A generic name with no directory (`SKILL.md`) or at a filesystem root has
+	// nothing informative to offer; mining `.` or `/` would only add noise.
+	if (!parent || parent === "." || parent === "/") return [];
+	return tokenizeLabel(parent);
+}
+
+/**
  * Build the candidate term list. Order matters: callers that truncate will
  * prefer the earlier entries, so the most specific signals come first.
  */
@@ -122,12 +160,12 @@ export function mineKeyterms(input: MineInput): string[] {
 	}
 
 	for (const path of input.filePaths ?? []) {
-		out.push(...tokenizeLabel(stem(path)));
+		out.push(...termsFromPath(path));
 	}
 
 	for (const text of input.texts ?? []) {
 		for (const token of pathLikeTokens(text)) {
-			out.push(...tokenizeLabel(stem(token)));
+			out.push(...termsFromPath(token));
 		}
 	}
 

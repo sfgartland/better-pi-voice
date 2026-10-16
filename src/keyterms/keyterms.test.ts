@@ -246,6 +246,23 @@ describe("mineKeyterms", () => {
 	test("scrapes paths out of prose", () => {
 		expect(mineKeyterms({ texts: ["why does src/voice/backends/deepgram.ts fail?"] })).toEqual(["deepgram"]);
 	});
+
+	test("mines the skill's own name, not the generic SKILL.md document stem", () => {
+		// Reading a skill is a read of `.../skills/<name>/SKILL.md`. The stem is a
+		// convention, not vocabulary; the directory is the name that matters.
+		expect(mineKeyterms({ filePaths: ["/home/me/.pi/agent/skills/multiagent-pipeline/SKILL.md"] })).toEqual([
+			"multiagent",
+			"pipeline",
+		]);
+	});
+
+	test("uses the parent directory for other generic document names", () => {
+		expect(mineKeyterms({ filePaths: ["/repo/skills/read-source/README.md"] })).toEqual(["read", "source"]);
+	});
+
+	test("drops a generic document name with no informative parent", () => {
+		expect(mineKeyterms({ filePaths: ["SKILL.md", "README.md"] })).toEqual([]);
+	});
 });
 
 describe("filePathsFromBranch", () => {
@@ -320,5 +337,24 @@ describe("collectKeytermSets", () => {
 		const set = collectKeytermSets({ userTerms: ["one", "two"], cwd: "/x/marginalia", maxTerms: 2 });
 
 		expect(set.truncated).toBe(true);
+	});
+
+	test("keeps mined seed jargon out of correction", () => {
+		// `settings` is seed jargon and a plausible file name. It may bias the
+		// recogniser, but it must not enter fuzzy repair, for the same reason the seed
+		// list itself is excluded: repair turns real words into prose-adjacent terms.
+		const set = collectKeytermSets({ filePaths: ["/repo/core/settings.ts"], useSeed: false });
+
+		expect(set.bias).toContain("settings");
+		expect(set.correct).not.toContain("settings");
+	});
+});
+
+describe("correction safety on mined vocabulary", () => {
+	test("does not rewrite ordinary words into a mined SKILL document stem", () => {
+		const set = collectKeytermSets({ filePaths: ["/repo/skills/brainstorming/SKILL.md"] });
+
+		expect(correctTranscript("i still need that", set.correct, "safe").text).toBe("i still need that");
+		expect(correctTranscript("do not spill it", set.correct, "safe").text).toBe("do not spill it");
 	});
 });
