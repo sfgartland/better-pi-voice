@@ -6,12 +6,24 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-16
+
 ### Added
 
 - A `media/demo.mp4` storyboard of the before/after transcription, wired into the
   package manifest as `pi.video` so the [pi package gallery](https://pi.dev/packages)
-  can preview it. This needs a release to take effect (the gallery reads the published
-  manifest).
+  can preview it.
+
+### Fixed
+
+- **A skill file no longer becomes the keyterm `SKILL`.** Keyterms are mined from the
+  basenames of files the session touches, so reading `…/skills/<name>/SKILL.md` mined
+  the generic document stem `SKILL`. The local backend's correction pass then rewrote
+  ordinary words one edit away from it — `still`, `spill`, `skull` and `swill` all came
+  back as `SKILL`. Generic document names (`SKILL`, `README`, `INDEX`, `LICENSE`,
+  `CHANGELOG`, …) now mine their parent directory instead, which carries the name that
+  actually matters, and a mined term that collides with the seed jargon is no longer
+  eligible for fuzzy repair.
 
 ## [0.1.0] - 2026-10-16
 
@@ -50,5 +62,6 @@ First release.
   distinguishes a rejected key, an unreachable host, and an HTTP error.
 - A `media/screenshot.png` before/after card, exposed to the gallery as `pi.image`.
 
-[Unreleased]: https://github.com/sfgartland/better-pi-voice/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/sfgartland/better-pi-voice/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/sfgartland/better-pi-voice/releases/tag/v0.1.1
 [0.1.0]: https://github.com/sfgartland/better-pi-voice/releases/tag/v0.1.0
