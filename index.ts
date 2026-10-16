@@ -11,6 +11,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { KeyId } from "@earendil-works/pi-tui";
 import { availableModels, resolveParakeetModelPath } from "./src/backends/parakeet.ts";
 import { ensureFirstRunSettings } from "./src/first-run.ts";
+import { runOverview } from "./src/overview.ts";
 import { backendLabel, createRuntime, type Runtime } from "./src/runtime.ts";
 import {
 	applySetting,
@@ -25,7 +26,6 @@ import {
 	writeSettings,
 } from "./src/settings.ts";
 import { runSetup, type SetupIo } from "./src/setup.ts";
-import { runTryIt } from "./src/try-it.ts";
 
 const BACKENDS = ["deepgram", "parakeet"] as const;
 type BackendId = (typeof BACKENDS)[number];
@@ -130,7 +130,7 @@ export default async function betterPiVoice(pi: ExtensionAPI): Promise<void> {
 		notify: (message, level) => ctx.ui.notify(message, level ?? "info"),
 		progress: (message) => ctx.ui.setWidget("voice-setup-status", [message], { placement: "aboveEditor" }),
 		clearProgress: () => ctx.ui.setWidget("voice-setup-status", undefined),
-		tryIt: (next) => runTryIt(ctx, next),
+		overview: (next) => runOverview(ctx, next),
 	});
 	// Apply the wizard's result. The command path can reload; the shortcut path
 	// cannot, so it rebuilds the runtime and asks for /reload if the binding moved.
@@ -157,9 +157,9 @@ export default async function betterPiVoice(pi: ExtensionAPI): Promise<void> {
 		if (settingUp) return;
 		settingUp = true;
 		try {
-			// The session runtime's raw-input listener runs ahead of any focused pane
-			// and consumes the shortcut, so it must come down while the wizard (and
-			// the Try it pane) owns the keyboard.
+			// The session runtime's raw-input listener runs ahead of any focused pane,
+			// so it must come down while the wizard (and its overview pane) owns the
+			// keyboard.
 			await runtime?.dispose();
 			runtime = undefined;
 			runtimePromise = undefined;

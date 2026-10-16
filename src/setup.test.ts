@@ -2,7 +2,7 @@ import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isolateAgentDir } from "../test-support/fake-pi.ts";
-import type { SetupIo, TryItOutcome } from "./setup.ts";
+import type { SetupIo, SetupOutcome } from "./setup.ts";
 
 // Must isolate before importing the settings module, which resolves pi's agent
 // dir when it writes.
@@ -19,20 +19,20 @@ beforeEach(() => {
 	delete process.env.DEEPGRAM_API_KEY;
 });
 
-type Answers = { select?: string[]; input?: string[]; confirm?: boolean[]; tryIt?: TryItOutcome[] };
+type Answers = { select?: string[]; input?: string[]; confirm?: boolean[]; overview?: SetupOutcome[] };
 
 function makeIo(answers: Answers = {}) {
 	const selects = [...(answers.select ?? [])];
 	const inputs = [...(answers.input ?? [])];
 	const confirms = [...(answers.confirm ?? [])];
-	const tryIts = [...(answers.tryIt ?? [])];
+	const overviews = [...(answers.overview ?? [])];
 	const notifications: Array<{ message: string; level?: string }> = [];
 	const io: SetupIo = {
 		select: async () => selects.shift(),
 		input: async () => inputs.shift(),
 		confirm: async () => confirms.shift() ?? true,
 		notify: (message, level) => notifications.push({ message, level }),
-		tryIt: async () => tryIts.shift() ?? "done",
+		overview: async () => overviews.shift() ?? "done",
 	};
 	return { io, notifications };
 }
@@ -121,11 +121,11 @@ describe("runSetup", () => {
 		expect(await runSetup(io, { base: DEFAULT_SETTINGS })).toBeUndefined();
 	});
 
-	test("runs the wizard again when Try it asks for a change", async () => {
+	test("runs the wizard again when the overview asks for a change", async () => {
 		const { io } = makeIo({
 			select: [PARAKEET, LOCAL_MODEL_LABEL, HOLD, DEEPGRAM, SKIP, TAP],
 			input: ["ctrl+alt+z", "ctrl+shift+v"],
-			tryIt: ["change", "done"],
+			overview: ["change", "done"],
 		});
 
 		const result = await runSetup(io, { base: DEFAULT_SETTINGS, models: async () => [MODEL] });

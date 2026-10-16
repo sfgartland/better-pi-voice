@@ -2,7 +2,7 @@
  * The guided setup wizard, run by `/voice setup` or the first time the shortcut
  * is pressed with no settings file.
  *
- * Every prompt goes through an injected `SetupIo`, and the final live test and
+ * Every prompt goes through an injected `SetupIo`, and the final overview and
  * model download through injectable functions, so the whole flow is testable
  * without a terminal or the network.
  */
@@ -20,7 +20,7 @@ import {
 	writeSettings,
 } from "./settings.ts";
 
-export type TryItOutcome = "done" | "change";
+export type SetupOutcome = "done" | "change";
 
 export type SetupIo = {
 	select(title: string, options: string[]): Promise<string | undefined>;
@@ -30,8 +30,8 @@ export type SetupIo = {
 	/** A transient status line, used for download progress. */
 	progress?(message: string): void;
 	clearProgress?(): void;
-	/** The live test at the end; injected so the wizard can be driven headless. */
-	tryIt(settings: VoiceSettings): Promise<TryItOutcome>;
+	/** The overview shown at the end; injected so the wizard can be driven headless. */
+	overview(settings: VoiceSettings): Promise<SetupOutcome>;
 };
 
 export type DownloadFn = (
@@ -267,8 +267,8 @@ async function collect(io: SetupIo, options: SetupOptions, base: VoiceSettings):
 }
 
 /**
- * Walk the user through setup, save the result, then run the live test. If the
- * test asks to change something, the wizard runs again from the top.
+ * Walk the user through setup, save the result, then show the overview. If the
+ * overview asks to change something, the wizard runs again from the top.
  */
 export async function runSetup(io: SetupIo, options: SetupOptions): Promise<VoiceSettings | undefined> {
 	let current = options;
@@ -277,7 +277,7 @@ export async function runSetup(io: SetupIo, options: SetupOptions): Promise<Voic
 		if (!settings) return undefined;
 
 		await writeSettings(settings);
-		const outcome = await io.tryIt(settings);
+		const outcome = await io.overview(settings);
 		if (outcome === "done") return settings;
 		current = { ...current, base: settings };
 	}

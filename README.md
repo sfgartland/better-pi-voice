@@ -13,6 +13,18 @@ Two interchangeable backends behind one pipeline:
 
 ## Why this exists
 
+Generic dictation is tuned for English prose, not for a terminal. It writes
+"sub agent" and "work tree", guesses at filenames, turns `tsconfig` into "T's
+config", and has no idea what your project is even called. That is not mostly a
+model-quality problem — it is a missing-context problem, and it is fixable: tell
+the recogniser the words the project actually uses. Cloud dictation is also a
+black box: when the socket drops mid-sentence, most tools lose the sentence.
+Local dictation usually trades accuracy for privacy and gives up on both.
+
+`better-pi-voice` attacks all three: vocabulary biasing mined from the repo and
+session, a recovery layer that will not drop a sentence, and a real local option
+behind the same pipeline.
+
 Claude Code's dictation is unusually good, and it isn't the model. Reverse-engineering
 it (`claude-code@2.1.295`) turned up three things worth stealing:
 
@@ -46,6 +58,26 @@ with keyterms      … so the subagent can use the worktree tsconfig, then check
 words. Two of the five terms came back wrong without biasing and all five were right
 with it.
 
+## How it compares to the other pi voice extensions
+
+Three voice extensions are in play, and they optimise for different things. This
+one is for **accurate dictation of code vocabulary**, from the cloud or locally:
+
+| | [`@earendil-works/pi-voice`](https://github.com/earendil-works/pi-voice) | [`pi-voice-stt`](https://github.com/cgarrot/pi-voice-stt) | **better-pi-voice** |
+|---|---|---|---|
+| Recognition | local only (`transcribe-cpp`) | several cloud providers + OpenAI-compatible | **Deepgram `nova-3` streaming** or local Parakeet |
+| Repo-aware vocabulary biasing | no | no | **yes** — keyterms mined from the repo and session, native on Deepgram |
+| Never-lose-a-sentence recovery | no | no | **yes** — retry, silent-drop replay, partial salvage, circuit breaker |
+| Capture | bundled `pvrecorder` | `ffmpeg` (or a Mac bridge) | `arecord`, falling back to SoX `rec` |
+| Transcribe an audio file | yes (`transcribe_file`) | yes (`transcribe_audio`) | no — this extension is for live dictation |
+| Guided setup | `/voice-settings` onboarding, model download | config file / environment | `/voice setup` wizard, model download |
+| Best for | a fully local, offline dictation tool | choosing among many cloud providers | dictating code accurately, with a private fallback |
+
+All three are MIT and coexist as pi packages, so there is no need to pick
+ideologically: use `pi-voice` if you want everything strictly local, `pi-voice-stt`
+if you want a particular provider, and this one if the words that come back are the
+thing you care about.
+
 ## Install
 
 ```bash
@@ -77,9 +109,11 @@ then `deepgram.apiKey` (inline), then `deepgram.apiKeyFile`.
 Run `/voice setup`, or just press the shortcut on a fresh install and it walks you
 through it. The wizard asks, in order: how voice should run (Deepgram cloud or local
 Parakeet), how to supply the key or which model to use, whether to hold or tap, and
-which shortcut. Then it saves, and ends with a **Try it** pane — press the shortcut,
-speak, and watch the transcript appear. Enter accepts it; Esc goes back and lets you
-change anything.
+which shortcut. Then it saves, and ends with an **overview** pane: the settings it
+wrote, how to use them (hold or press the shortcut, where the text goes), and how to
+change any of it later with `/voice setup`. Enter closes it; Esc goes back and
+re-runs the wizard. There is no live microphone test to sit through — try the
+shortcut yourself when you are ready.
 
 For the key, if `DEEPGRAM_API_KEY` is already in your environment the wizard offers to
 just use it; otherwise you can paste a key (kept `0600`, never in settings) or point at
@@ -111,7 +145,7 @@ A hard cap applies in both modes so a stuck key cannot leave the microphone open
 Commands:
 
 - `/voice` — backend, model, mode, shortcut, keyterm count, whether the key is visible, state
-- `/voice setup` — guided setup (backend, key/model, mode, shortcut, then a live Try it)
+- `/voice setup` — guided setup (backend, key/model, mode, shortcut, then an overview of the result)
 - `/voice backend` — pick a backend from a menu
 - `/voice backend deepgram|parakeet` — switch directly, then reload
 - `/voice model` — pick a local GGUF already in the Hugging Face cache, then reload
