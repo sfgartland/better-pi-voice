@@ -59,7 +59,7 @@ streaming session state machine, the recovery semantics, and the UI.**
 | G3 | Claude Code's **recovery semantics**: interim→final commit discipline, one early retry, silent-drop replay, partial salvage, circuit breaker, precise error taxonomy. |
 | G4 | Two **interaction modes** in v1 — hold-to-talk and tap-to-toggle — with the same timings as the reference. (Focus mode is deferred; see §7.6.) |
 | G5 | **Live UX**: audio-level widget above the editor, interim text in the editor, status indicator, actionable errors. |
-| G6 | Fit the `pi-extensions` house style: `@sfgartland/pi-*`, one package one problem, minimal config surface, biome + tsc clean, tested. |
+| G6 | Fit the `pi-extensions` house style: one package one problem, minimal config surface, biome + tsc clean, tested. |
 | G7 | **Zero keystroke risk**: the raw-input handler must never swallow or reorder normal typing. |
 
 ## 3. Non-goals
@@ -478,7 +478,7 @@ Carried to chat, most important first.
    environment an acceptable contract?
 4. **Latency budget** — what number counts as "as good as Claude Code" for the acceptance test, and
    must that test run offline (fake backend only) or against the live Deepgram API?
-5. **Package name** — `@sfgartland/pi-add-voice` under `packages/add/`, or a `core/` name?
+5. **Package name** — `better-pi-voice` as a standalone repo, or a name under `packages/add/`?
 
 ## 12. Left to the builder
 

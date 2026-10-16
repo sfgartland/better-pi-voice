@@ -95,9 +95,9 @@ official `@earendil-works/pi-voice` 0.2.0 — published 2026-10-16, the same day
 doc — added live pause-aware chunking driven by Silero VAD. That one is *more*
 sophisticated than the amplitude-based heuristic here.
 
-For comparison, the `@sfgartland` family itself does 1.1k–4.5k/mo (`pi-core-subagent` 4,512;
-`pi-add-mode` 1,832; `pi-senja` 1,316). A realistic good outcome is a few thousand
-downloads a month; the voice niche's ceiling is in the high thousands.
+For calibration, the voice extensions above run **900–3,800 downloads/mo**. A realistic
+good outcome for a focused voice extension is a few thousand downloads a month; the
+niche's ceiling is in the high thousands.
 
 ### The wedge (say this, not "voice input")
 

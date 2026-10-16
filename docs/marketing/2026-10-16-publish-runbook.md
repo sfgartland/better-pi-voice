@@ -1,52 +1,47 @@
 # Publish runbook — `@sfgartland/better-pi-voice` 0.1.0
 
 **Date:** 2026-10-16
-**State:** everything that can be done without credentials is done (commits
-`0a73d52` and earlier). The package is clean, tested, and packaged. Two steps need
-account access that this machine does not currently have — they are marked
-**[BLOCKED]** below.
+**State:** everything that can be done without credentials is done. The package is
+clean, tested, and packaged. One step needs an account login — marked **[BLOCKED]**.
 
 Verified now:
 
 ```
-npm run check     → 303 pass, tsc clean, biome clean
-npm pack          → 65 kB tarball, 24 files (tests excluded)
-npm publish --dry-run → @sfgartland/better-pi-voice@0.1.0, public access
+npm run check          → 303 pass, tsc clean, biome clean
+npm pack               → 65 kB tarball, 24 files (tests excluded)
+npm publish --dry-run  → @sfgartland/better-pi-voice@0.1.0, public access
 ```
 
 ---
 
-## Blocker 1 — npm is not logged in
+## Blocker — npm is not logged in
 
 ```
 $ npm whoami
 npm error code ENEEDAUTH
 ```
 
-Fix, then publish:
+There is no `~/.npmrc`, so nothing is authenticated. Fix, then publish:
 
 ```bash
-npm login          # log in as the owner of the @sfgartland scope
+npm login          # log in as: sfgartland
 npm whoami         # should print: sfgartland
 npm publish --access public
 npm view @sfgartland/better-pi-voice version
 ```
 
-## Blocker 2 — the GitHub account has no push to `sfgartland`
+`@sfgartland` is a **user scope**: npm lets an account publish `@<its-username>/…`
+without creating an organization first. If npm asks for an org, create one named
+`sfgartland` (free for public packages).
 
-`gh` is authenticated as **`sfgartland`**, which has only *pull* on `sfgartland/*`
-(`gh api repos/sfgartland/pi-extensions` → `push: false`). The repo `sfgartland/better-pi-voice`
-does not exist yet. Choose one:
+## GitHub — already unblocked
+
+`gh` is authenticated as **`sfgartland`**, which is the account that will own the
+repo, so there is nothing to switch. Create it and push:
 
 ```bash
-# Option A: switch to the sfgartland account, then create + push
-gh auth switch --user sfgartland
 gh repo create sfgartland/better-pi-voice --public --source=. --remote=origin --push \
   --description "Accurate voice dictation for the pi coding agent — Deepgram or local Parakeet, biased with your repo's vocabulary."
-
-# Option B: create it empty in the web UI as sfgartland, then
-git remote add origin git@github.com:sfgartland/better-pi-voice.git
-git push -u origin main
 ```
 
 Then set topics and homepage (the gallery and search use these):
@@ -63,8 +58,8 @@ Social preview → upload `media/screenshot.png`.
 ## After publishing — verify, in this order
 
 1. `pi install npm:@sfgartland/better-pi-voice` from a clean shell, then `/voice setup`.
-2. Gallery page appears: <https://pi.dev/packages/@sfgartland/better-pi-voice> (shows the
-   README, `pi install` line, download counts, and the `pi.image` preview).
+2. Gallery page appears: <https://pi.dev/packages/@sfgartland/better-pi-voice> (shows
+   the README, the `pi install` line, download counts, and the `pi.image` preview).
 3. It shows up in the auto-discovered list on the next daily run:
    <https://github.com/shaftoe/awesome-pi-coding-agent> (also
    <https://awesome-pi.site>).
@@ -79,7 +74,7 @@ Social preview → upload `media/screenshot.png`.
 |---|---|---|
 | `shaftoe/awesome-pi-coding-agent` | auto-discovered from npm, rebuilt daily | none — just publish |
 | `piindex.dev` | curates from `BubblePtr/awesome-pi` | via the awesome-pi entry below |
-| `BubblePtr/awesome-pi` (139★, has an English README too) | pull request or "Suggest a resource" issue | **entry below** |
+| `BubblePtr/awesome-pi` (139★, English README too) | pull request or "Suggest a resource" issue | **entry below** |
 | `thevibeworks/awesome-pi-agent` | pull request, alphabetical in section | **entry below** |
 | `bradAGI/awesome-cli-coding-agents` (1362★) | whole agents/harnesses, not pi extensions | not a good fit — skip |
 
@@ -106,7 +101,7 @@ Insert next to the existing `@juicesharp/rpiv-voice` line:
 - [better-pi-voice](https://github.com/sfgartland/better-pi-voice) — Streaming voice input biased with your repository's vocabulary; Deepgram or local Parakeet, with replay/salvage recovery.
 ```
 
-### Opening the PRs (from this machine, as `sfgartland` — fine for a third-party repo)
+### Opening the PRs
 
 ```bash
 gh repo fork BubblePtr/awesome-pi --clone=false
@@ -130,4 +125,3 @@ Repeat for `thevibeworks/awesome-pi-agent` (same fork/clone/branch/PR shape).
   before/after text is enough; `media/screenshot.svg` is the storyboard.
 - **A landing page**: GitHub Pages with the image, the before/after, and the install
   line. Every list links out to the repo; the repo is where the pitch has to land.
-- **`/press-kit`**: pi.dev has one; if it offers a "featured package" route, take it.

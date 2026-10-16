@@ -3,7 +3,7 @@
 	"version": "0.1.0",
 	"description": "Streaming voice input for pi: Deepgram (nova-3, repo-aware keyterms) or local Parakeet, with Claude-Code-style recovery so speech is never lost.",
 	"license": "MIT",
-	"author": "sfgartland",
+	"author": "Severin Gartland <sfgartland@hotmail.com>",
 	"type": "module",
 	"engines": {
 		"node": ">=20"
