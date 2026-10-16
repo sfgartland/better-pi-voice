@@ -33,7 +33,7 @@ Then the posts. Do them in this order, once the gallery page resolves:
 1. pi Discord — the short message in `2026-10-16-launch-announcements.md`.
 2. pi GitHub Discussions — `General` is the only category the pi repo has right now.
 3. Blog post — publish to dev.to or a personal blog, then link it from the repo.
-4. Optional HN / Reddit — ang per the announcements file; HN framed as accuracy, not
+4. Optional HN / Reddit — angle per the announcements file; HN framed as accuracy, not
    as "a pi extension".
 
 A `patch` release (0.1.1) is needed before the gallery can autoplay the video, because
