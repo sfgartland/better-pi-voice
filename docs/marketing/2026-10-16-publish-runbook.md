@@ -34,21 +34,14 @@ npm view @sfgartland/better-pi-voice version
 without creating an organization first. If npm asks for an org, create one named
 `sfgartland` (free for public packages).
 
-## GitHub — already unblocked
+## GitHub — done
 
-`gh` is authenticated as **`sfgartland`**, which is the account that will own the
-repo, so there is nothing to switch. Create it and push:
-
-```bash
-gh repo create sfgartland/better-pi-voice --public --source=. --remote=origin --push \
-  --description "Accurate voice dictation for the pi coding agent — Deepgram or local Parakeet, biased with your repo's vocabulary."
-```
-
-Then set topics and homepage (the gallery and search use these):
+The repo is live at <https://github.com/sfgartland/better-pi-voice> (public), pushed
+from this working tree, with topics applied. After the npm publish, point the repo
+homepage at the gallery page:
 
 ```bash
 gh repo edit sfgartland/better-pi-voice \
-  --add-topic pi-package,pi-extension,dictation,speech-to-text,deepgram,parakeet,coding-agent,cli,linux,offline \
   --homepage "https://pi.dev/packages/@sfgartland/better-pi-voice"
 ```
 
