@@ -13,6 +13,35 @@
 | `shaftoe/awesome-pi-coding-agent` | auto-crawl from npm — picks it up on the next daily run |
 | `pi.dev/packages/@sfgartland/better-pi-voice` | not indexed yet; the gallery runs on a schedule |
 | social preview image | set by hand in repo settings (no CLI) |
+| `v0.1.0` tag | created locally; **pushing it + the GitHub Release are the blocked steps** |
+| demo video (`pi.video`) | `media/demo.mp4` committed; reaches the gallery only on the next publish |
+| blog post | drafted at [`docs/blog/`](../blog/2026-10-16-what-claude-codes-dictation-does-differently.md); not posted |
+| launch announcements | drafted at [`2026-10-16-launch-announcements.md`](2026-10-16-launch-announcements.md); not posted |
+
+## Cutting the release (blocked — going public)
+
+The changelog is committed and `v0.1.0` is tagged locally. To publish the tag and the
+GitHub Release:
+
+```bash
+git push origin v0.1.0
+gh release create v0.1.0 --title "v0.1.0" --notes-from-tag
+```
+
+Then the posts. Do them in this order, once the gallery page resolves:
+
+1. pi Discord — the short message in `2026-10-16-launch-announcements.md`.
+2. pi GitHub Discussions — `General` is the only category the pi repo has right now.
+3. Blog post — publish to dev.to or a personal blog, then link it from the repo.
+4. Optional HN / Reddit — ang per the announcements file; HN framed as accuracy, not
+   as "a pi extension".
+
+A `patch` release (0.1.1) is needed before the gallery can autoplay the video, because
+the gallery reads `pi.video` from the published manifest, not from `main`:
+
+```bash
+npm version patch && git push --follow-tags && npm publish --access public
+```
 
 Verified:
 

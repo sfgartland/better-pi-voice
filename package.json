@@ -57,7 +57,8 @@
 		"extensions": [
 			"./index.ts"
 		],
-		"image": "https://raw.githubusercontent.com/sfgartland/better-pi-voice/main/media/screenshot.png"
+		"image": "https://raw.githubusercontent.com/sfgartland/better-pi-voice/main/media/screenshot.png",
+		"video": "https://raw.githubusercontent.com/sfgartland/better-pi-voice/main/media/demo.mp4"
 	},
 	"scripts": {
 		"typecheck": "tsc --noEmit",

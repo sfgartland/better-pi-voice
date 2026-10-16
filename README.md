@@ -1,8 +1,10 @@
 # @sfgartland/better-pi-voice
 
+![the same sentence transcribed without keyterms (sub agent, Worktree T's config) and with them (subagent, worktree tsconfig)](https://raw.githubusercontent.com/sfgartland/better-pi-voice/main/media/screenshot.png)
+
 Streaming voice input for pi. Hold a key, talk, and the words land in the editor —
 in the right spelling, including the jargon and filenames generic speech
-recognition gets wrong.
+recognition gets wrong. ([8-second demo](https://github.com/sfgartland/better-pi-voice/raw/main/media/demo.mp4))
 
 Two interchangeable backends behind one pipeline:
 
