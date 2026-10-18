@@ -867,4 +867,76 @@ describe("queue", () => {
 		expect(h.controller.queueDepth).toBe(0);
 		expect(h.finals).toEqual(["second"]);
 	});
+
+	test("refuses a new recording when the job cap is reached and says so", async () => {
+		const gate = deferred<void>();
+		const h = makeHarness({}, { maxQueuedJobs: 2 });
+		h.backend.plans = [
+			{ finalizeGate: gate.promise },
+			{ finalizeGate: gate.promise },
+			{ finalOnFinalize: "never" },
+		];
+
+		await start(h);
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+		h.controller.press(); // second recording, allowed
+		await flush();
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+		expect(h.controller.queueDepth).toBe(2);
+
+		h.controller.press(); // third is refused: no new capture
+		await flush();
+		expect(h.capture.startCount).toBe(2);
+		expect(h.controller.currentState).toBe("queued");
+		expect(h.notices).toHaveLength(1);
+		expect(h.notices[0]).toContain("queue is full");
+
+		gate.resolve();
+		await flush();
+	});
+
+	test("refuses a new recording when buffered job audio would exceed the budget", async () => {
+		const gate = deferred<void>();
+		const h = makeHarness({}, { maxQueuedAudioBytes: 1_000 });
+		h.backend.plans = [{ finalizeGate: gate.promise }];
+
+		await start(h);
+		h.capture.emit(pcmOf(900, 4_000)); // 4 KB retained > 1 KB budget
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+
+		h.controller.press();
+		await flush();
+		expect(h.capture.startCount).toBe(1);
+		expect(h.notices[0]).toContain("queue is full");
+
+		gate.resolve();
+		await flush();
+	});
+
+	test("a refused press arms no timers and a later release is ignored", async () => {
+		const gate = deferred<void>();
+		const h = makeHarness({}, { maxQueuedJobs: 1 });
+		h.backend.plans = [{ finalizeGate: gate.promise }];
+		await start(h);
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+
+		h.clock.advance(10_000); // let any stray timers fire while idle
+		const timersBefore = h.clock.pending;
+		h.controller.press(); // refused
+		expect(h.clock.pending).toBe(timersBefore); // no fallback/release timer armed
+		h.controller.release(); // must not finish anything
+		await flush();
+		expect(h.capture.startCount).toBe(1);
+
+		gate.resolve();
+		await flush();
+	});
 });

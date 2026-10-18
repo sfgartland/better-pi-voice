@@ -151,7 +151,12 @@ export class VoiceController {
 				if (this.active.phase === "recording") this.finish(this.active);
 				return;
 			}
-			if (!this.starting) void this.begin();
+			if (this.starting) return;
+			if (!this.canAccept()) {
+				this.notifyQueueFull();
+				return;
+			}
+			void this.begin();
 			return;
 		}
 
@@ -161,6 +166,12 @@ export class VoiceController {
 			return;
 		}
 		if (this.starting) return;
+		if (!this.canAccept()) {
+			// Refuse before arming the hold fallback: a refused press must leave no
+			// timer behind that could later finish somebody else's session.
+			this.notifyQueueFull();
+			return;
+		}
 		void this.begin();
 		// `begin()` sets `this.active` synchronously; the cast defeats the
 		// control-flow narrowing from the `if (this.active)` above.
@@ -175,6 +186,27 @@ export class VoiceController {
 				this.armRelease(session);
 			}
 		});
+	}
+
+	/** Whether another recording may be queued right now. */
+	private canAccept(): boolean {
+		return (
+			this.jobs.length < this.timings.maxQueuedJobs && this.queuedAudioBytes() < this.timings.maxQueuedAudioBytes
+		);
+	}
+
+	private queuedAudioBytes(): number {
+		let total = 0;
+		for (const job of this.jobs) total += job.audio.byteLength;
+		return total;
+	}
+
+	private queueFullMessage(): string {
+		return `Voice queue is full (${String(this.queueDepth)} recordings waiting). Wait for transcription to catch up.`;
+	}
+
+	private notifyQueueFull(): void {
+		this.deps.hooks?.onNotice?.(this.queueFullMessage(), "warning");
 	}
 
 	/** Hold mode: repeated key events from auto-repeat. */
