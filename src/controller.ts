@@ -123,7 +123,6 @@ export class VoiceController {
 	/** Results waiting for their turn to be emitted, by seq. */
 	private readonly finished = new Map<number, string>();
 	private readonly inflight = new Set<Promise<void>>();
-	private emittedSinceDrain = false;
 	private active: VoiceSession | undefined;
 	private readonly timings: ControllerTimings;
 	private readonly clock: Clock;
@@ -245,6 +244,7 @@ export class VoiceController {
 	 * `paused`; (5) never emit again once this resolves.
 	 */
 	async dispose(): Promise<void> {
+		this.disposed = true;
 		const active = this.active;
 		if (active && active.phase === "recording") this.finish(active);
 		if (this.active) {
@@ -268,7 +268,6 @@ export class VoiceController {
 		this.failureTimes = [];
 		this.failureHint = undefined;
 		this.emitReady();
-		this.disposed = true;
 		this.refreshState();
 	}
 
@@ -517,6 +516,9 @@ export class VoiceController {
 		this.finished.set(session.seq, text);
 		session.audio.clear();
 		this.emitReady();
+		// The last recording has been emitted: the runtime uses this to submit once
+		// per drained queue. Never during shutdown, which is not a "drain".
+		if (!this.disposed && this.queueDepth === 0) this.deps.hooks?.onQueueDrained?.();
 		this.refreshState();
 	}
 
@@ -525,15 +527,8 @@ export class VoiceController {
 		while (this.finished.has(this.nextToEmit)) {
 			const text = this.finished.get(this.nextToEmit) ?? "";
 			this.finished.delete(this.nextToEmit);
-			if (text) {
-				this.deps.hooks?.onFinal?.(text, this.nextToEmit);
-				this.emittedSinceDrain = true;
-			}
+			if (text) this.deps.hooks?.onFinal?.(text, this.nextToEmit);
 			this.nextToEmit++;
-		}
-		if (this.queueDepth === 0 && this.emittedSinceDrain) {
-			this.emittedSinceDrain = false;
-			this.deps.hooks?.onQueueDrained?.();
 		}
 	}
 
@@ -646,11 +641,13 @@ export class VoiceController {
 		// needs to know that even after the connection later drops.
 		if (event.type === "interim" || event.type === "final") session.streamWasConnected = true;
 
-		switch (event.type) {
+			switch (event.type) {
 			case "interim": {
 				if (session.phase !== "recording" && session.phase !== "arming") return;
 				session.pendingInterim = event.text;
-				this.deps.hooks?.onInterim?.(this.composeInterim(session, event.text), session.seq);
+				if (this.interimVisible(session)) {
+					this.deps.hooks?.onInterim?.(this.composeInterim(session, event.text), session.seq);
+				}
 				this.armSilenceTimer(session);
 				return;
 			}
@@ -660,7 +657,9 @@ export class VoiceController {
 				if (!text) return;
 				session.sawTranscript = true;
 				session.transcript = session.transcript ? `${session.transcript} ${text}` : text;
-				this.deps.hooks?.onInterim?.(session.transcript, session.seq);
+				if (this.interimVisible(session)) {
+					this.deps.hooks?.onInterim?.(session.transcript, session.seq);
+				}
 				this.armSilenceTimer(session);
 				return;
 			}
@@ -669,6 +668,15 @@ export class VoiceController {
 				return;
 			}
 		}
+	}
+
+	/**
+	 * Interim text is only shown for the live recording and only when nothing
+	 * else is still transcribing: a queue of older text must not be overwritten
+	 * by a newer recording's tentative words.
+	 */
+	private interimVisible(session: VoiceSession): boolean {
+		return this.queueDepth === 0 && this.active === session;
 	}
 
 	/** Interim text is rendered after whatever has already been committed. */

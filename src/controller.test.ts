@@ -972,3 +972,38 @@ describe("dispose", () => {
 		expect(h.finals).toEqual(["second"]);
 	});
 });
+
+describe("sequence-aware output", () => {
+	test("suppresses interims while another recording is still transcribing", async () => {
+		const gate = deferred<void>();
+		const h = makeHarness();
+		h.backend.plans = [
+			{ finalizeGate: gate.promise },
+			{ events: [{ type: "interim", text: "live" }, { type: "final", text: "second" }] },
+		];
+
+		await start(h);
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+		h.controller.press(); // job pending + a live recording
+		await flush();
+		expect(h.interims).not.toContain("live");
+
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+		gate.resolve();
+		await flush();
+		expect(h.finals).toEqual(["second"]);
+	});
+
+	test("signals a drained queue exactly once", async () => {
+		const h = makeHarness();
+		await start(h);
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+		expect(h.drained).toBe(1);
+	});
+});

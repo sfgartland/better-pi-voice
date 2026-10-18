@@ -3,6 +3,8 @@
  * the editor without stomping on what the user is typing.
  */
 
+import type { VoiceState } from "./controller.ts";
+
 export const LEVEL_WIDGET_KEY = "better-pi-voice-level";
 export const STATUS_KEY = "better-pi-voice";
 
@@ -34,27 +36,82 @@ export type EditorTextAccess = {
 export class EditorSink {
 	private prefix = "";
 	private lastWritten: string | undefined;
+	private readonly finals = new Map<number, string>();
+	private live: { seq: number; text: string } | undefined;
+	/** The user typed since we last wrote, so their text owns the line. */
+	private adopted = false;
 
 	constructor(private readonly editor: EditorTextAccess) {}
 
-	/** Capture the surrounding text when a session begins. */
+	/**
+	 * Start a new recording's editor region. Text already committed by earlier
+	 * recordings is folded into the prefix so this recording continues after it
+	 * rather than replacing it.
+	 */
 	begin(): void {
-		this.prefix = this.editor.get();
+		if (this.finals.size > 0 || this.live) {
+			this.prefix = this.renderAll();
+			this.finals.clear();
+			this.live = undefined;
+		}
+		this.refreshPrefix();
 		this.lastWritten = undefined;
+		this.adopted = false;
 	}
 
 	/** Show live text, replacing whatever we last showed. */
-	showInterim(text: string): void {
+	showInterim(seq: number, text: string): void {
 		this.refreshPrefix();
-		this.write(this.join(text));
+		this.live = { seq, text };
+		this.write(this.renderPreview());
 	}
 
-	/** Final text for the session. Returns what should be submitted. */
-	commit(text: string): string {
+	/** Commit one recording's final text. Returns what the editor now holds. */
+	commit(seq: number, text: string): string {
 		this.refreshPrefix();
-		const combined = this.join(text);
-		this.write(combined);
-		return combined;
+		if (text.trim().length > 0) {
+			this.finals.set(seq, text);
+			if (this.live?.seq === seq) this.live = undefined;
+		}
+		const rendered = this.renderPreview();
+		this.write(rendered);
+		return rendered;
+	}
+
+	/** Everything committed so far, in recording order, for submission. */
+	submitText(): string {
+		const text = this.renderAll();
+		this.finals.clear();
+		this.live = undefined;
+		return text;
+	}
+
+	/** The committed final with the largest `seq`. */
+	private latestFinal(): { seq: number; text: string } | undefined {
+		let latest: { seq: number; text: string } | undefined;
+		for (const [seq, text] of this.finals) {
+			if (!latest || seq > latest.seq) latest = { seq, text };
+		}
+		return latest;
+	}
+
+	/** What the editor shows: the newest final, then the live interim. */
+	private renderPreview(): string {
+		let out = this.prefix;
+		const latest = this.latestFinal();
+		if (latest) out = this.join(out, latest.text);
+		if (this.live) out = this.join(out, this.live.text);
+		return out;
+	}
+
+	/** Every committed final in recording order, then the live interim. */
+	private renderAll(): string {
+		let out = this.prefix;
+		for (const seq of [...this.finals.keys()].sort((a, b) => a - b)) {
+			out = this.join(out, this.finals.get(seq) ?? "");
+		}
+		if (this.live) out = this.join(out, this.live.text);
+		return out;
 	}
 
 	private refreshPrefix(): void {
@@ -62,15 +119,21 @@ export class EditorSink {
 		// Before the first write, the captured prefix is what we expect to find;
 		// after it, what we last wrote is. Anything else means the user typed.
 		const expected = this.lastWritten ?? this.prefix;
-		if (current !== expected) this.prefix = current;
+		if (current !== expected) {
+			this.prefix = current;
+			this.adopted = true;
+		}
 	}
 
-	private join(text: string): string {
-		const trimmed = text.trim();
-		if (!trimmed) return this.prefix;
-		if (this.prefix.length === 0) return trimmed;
-		// Put the transcript on its own line so it never runs into existing prose.
-		return this.prefix.endsWith("\n") ? `${this.prefix}${trimmed}` : `${this.prefix}\n${trimmed}`;
+	private join(text: string, extra: string): string {
+		const trimmed = extra.trim();
+		if (!trimmed) return text;
+		if (text.length === 0) return trimmed;
+		if (text.endsWith("\n")) return `${text}${trimmed}`;
+		// A prefix ending in a space is a label ("note: "), so the transcript
+		// continues it. Once the user is typing, it always starts a new line.
+		if (text.endsWith(" ") && !this.adopted) return `${text}${trimmed}`;
+		return `${text}\n${trimmed}`;
 	}
 
 	private write(text: string): void {
@@ -78,8 +141,6 @@ export class EditorSink {
 		this.editor.set(text);
 	}
 }
-
-import type { VoiceState } from "./controller.ts";
 
 /**
  * The status line. `label` names the backend and the model, so it is always

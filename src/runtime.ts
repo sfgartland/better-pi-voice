@@ -154,10 +154,14 @@ export async function createRuntime(
 				if (state === "recording" || state === "arming") editor.begin();
 				if (state === "idle" || state === "paused") ctx.ui.setWidget(LEVEL_WIDGET_KEY, undefined);
 			},
-			onInterim: (text) => editor.showInterim(text),
-			onFinal: (text) => {
-				const combined = editor.commit(text);
-				if (settings.submitOnStop) pi.sendUserMessage(combined);
+			onInterim: (text, seq) => editor.showInterim(seq, text),
+			onFinal: (text, seq) => {
+				editor.commit(seq, text);
+			},
+			onQueueDrained: () => {
+				// One submit per drained queue, so a burst of recordings lands as a
+				// single message rather than one message per final.
+				if (settings.submitOnStop) pi.sendUserMessage(editor.submitText());
 			},
 			onLevel: (levels) => {
 				const now = Date.now();
