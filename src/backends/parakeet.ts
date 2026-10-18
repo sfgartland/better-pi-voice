@@ -715,7 +715,7 @@ export class ParakeetBackend implements VoiceBackend {
 	}
 
 	/** A stream has ended: free the model once the last one is gone. */
-	private onSessionReleased(): void {
+	private releaseSession(): void {
 		if (this.activeSessions > 0) this.activeSessions--;
 		if (this.activeSessions > 0) return;
 		this.scheduleIdleUnload();
@@ -858,6 +858,32 @@ export class ParakeetBackend implements VoiceBackend {
 
 	async start(options: StartOptions, emit: (event: VoiceEvent) => void): Promise<VoiceStream | undefined> {
 		this.disposed = false;
+		// The count covers the whole start window, not just the open stream: a
+		// `dispose()`/`unload()` that lands while the model is still being loaded
+		// or a session opened must not free it underneath us. The stream inherits
+		// the count and gives it back when it closes.
+		this.activeSessions++;
+		let handedOff = false;
+		try {
+			return await this.openSession(options, emit, () => {
+				handedOff = true;
+			});
+		} finally {
+			if (!handedOff) this.releaseSession();
+		}
+	}
+
+	/**
+	 * Everything `start()` does, split out so the session count can be taken
+	 * before the first await and released on every failure path.
+	 *
+	 * `onHandedOff` runs once a stream owns the session count.
+	 */
+	private async openSession(
+		options: StartOptions,
+		emit: (event: VoiceEvent) => void,
+		onHandedOff: () => void,
+	): Promise<VoiceStream | undefined> {
 		const path = await this.resolvePath();
 		if (!path) return undefined;
 
@@ -886,12 +912,12 @@ export class ParakeetBackend implements VoiceBackend {
 			// tail is left to transcribe when the recording stops.
 			const chunkSeconds = this.options.chunkSeconds ?? DEFAULT_CHUNK_SECONDS;
 			const detector = await this.createBatchDetector(chunkSeconds, this.options.silenceLevel ?? SILENCE_LEVEL);
-			this.activeSessions++;
+			onHandedOff();
 			return new ParakeetBatchStream({
 				chunkSeconds,
 				detector,
 				emit,
-				onReleased: () => this.onSessionReleased(),
+				onReleased: () => this.releaseSession(),
 				transcribe: (pcm) =>
 					this.serializeTranscribe(async () => (await model.transcribe(pcm, { language, timestamps: "none" })).text),
 			});
@@ -904,8 +930,8 @@ export class ParakeetBackend implements VoiceBackend {
 					'The configured model cannot stream. Set parakeet.mode to "batch" to use it, or choose a streaming model.',
 				code: "no_streaming",
 			});
-			// The model was loaded, so it must be released rather than left resident.
-			this.scheduleIdleUnload();
+			// The failure paths below all return undefined, which gives the session
+			// count back (and so releases the model) in `start()`'s `finally`.
 			return undefined;
 		}
 
@@ -920,12 +946,11 @@ export class ParakeetBackend implements VoiceBackend {
 				commitPolicy: "stable_prefix" as const,
 				stablePrefixAgreementN: STABLE_PREFIX_AGREEMENT,
 			});
-			this.activeSessions++;
-			return new ParakeetStream(stream, session, emit, () => this.onSessionReleased());
+			onHandedOff();
+			return new ParakeetStream(stream, session, emit, () => this.releaseSession());
 		} catch (error) {
 			// A session that was created but whose stream failed must still be freed.
 			session?.dispose();
-			this.scheduleIdleUnload();
 			emit({
 				type: "error",
 				message: `Could not start the local transcriber: ${String(error)}`,
