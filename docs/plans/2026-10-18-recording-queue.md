@@ -50,7 +50,7 @@ The spec is a vision document; these input classes are implied but not spelled o
 - `src/testing/deferred.ts` — a manually resolved promise, for holding `finalize()`.
 - `src/backends/vad.ts` — Silero segmentation + cut planning (pure functions).
 - `src/backends/vad.test.ts`
-- `src/backends/pause-detector.ts` — `PauseDetector`, `LevelPauseDetector`, `VadPauseDetector`.
+- `src/backends/pause-detector.ts` — `PauseDetector`, `createLevelPauseDetector`, `createVadPauseDetector`.
 - `src/backends/pause-detector.test.ts`
 - `src/packaging.test.ts` — the pi-package discoverability guard (Task 18).
 
@@ -173,7 +173,7 @@ git commit -m "refactor: extract per-recording VoiceSession"
 
 **Interfaces:**
 - Consumes: `VoiceSession` (Task 1).
-- Produces: `VoiceState` gains `"queued"`; `VoiceController` gains `get queueDepth(): number` and `get pendingSeq(): number`; `ControllerHooks` gains `onNotice?` and `onQueueDrained?`; `onFinal?(text: string, seq: number)`.
+- Produces: `VoiceState` gains `"queued"`; `VoiceController` gains `get queueDepth(): number`; `ControllerHooks` gains `onNotice?` and `onQueueDrained?`; `onFinal?(text: string, seq: number)`.
 
 ```ts
 export type VoiceState = "idle" | "arming" | "recording" | "processing" | "queued" | "paused";
@@ -550,10 +550,10 @@ git commit -m "feat: refuse a recording when the transcription queue is full"
 ### Task 6: Deterministic shutdown drain
 
 **Files:**
-- Modify: `src/controller.ts`, `src/runtime.ts`, `src/controller.test.ts`, `src/runtime.test.ts`
+- Modify: `src/controller.ts`, `src/runtime.ts`, `src/try-it.ts`, `src/controller.test.ts`, `src/runtime.test.ts`
 
 **Interfaces:**
-- Produces: `VoiceController.dispose(): Promise<void>` (was `void`). Contract: (1) stop the active capture; (2) wait up to `disposeGraceMs` for in-flight jobs; (3) store `""` for anything still unsettled, then `emitReady()` so already-finished text is not lost; (4) leave `currentState === "idle"`, `queueDepth === 0`; (5) no `onFinal`/`onNotice` after the promise resolves.
+- Produces: `VoiceController.dispose(): Promise<void>` (was `void`). Contract: (1) stop the active capture; (2) wait up to `disposeGraceMs` for in-flight jobs; (3) store `""` for anything still unsettled, then `emitReady()` so already-finished text is not lost; (4) reset the breaker to closed so the derived `currentState === "idle"` (never `"paused"`) with `queueDepth === 0`; (5) no `onFinal`/`onNotice` after the promise resolves.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -594,7 +594,7 @@ test("dispose stops the microphone, keeps finished text, and returns despite a h
 Run: `bun test src/controller.test.ts -t "dispose stops"`
 Expected: FAIL — `dispose()` returns `undefined`/not awaitable, or the hung job keeps the queue non-empty.
 
-- [ ] **Step 3: Implement** `async dispose()` per the contract, tracking `inflight` promises and racing them against a `this.clock.setTimeout(disposeGraceMs)` promise. Set `this.disposed = true` first so guards make late `store`/`emitReady`/`refreshState` no-ops. In `src/runtime.ts` change `controller.dispose()` to `await controller.dispose()` and keep `await backend.dispose?.()`. In `src/runtime.test.ts` assert the existing runtime test still awaits cleanly (`await runtime.dispose()` already there).
+- [ ] **Step 3: Implement** `async dispose()` per the contract, tracking `inflight` promises and racing them against a `this.clock.setTimeout(disposeGraceMs)` promise. Set `this.disposed = true` first so guards make late `store`/`emitReady`/`refreshState` no-ops, and reset the breaker to closed before re-deriving state (contract 4: dispose must derive `idle`, not `paused`). In `src/runtime.ts` change `controller.dispose()` to `await controller.dispose()` and keep `await backend.dispose?.()`. In `src/try-it.ts` change the unawaited `controller.dispose();` call in the `finally` to `await controller.dispose();`. In `src/runtime.test.ts` assert the existing runtime test still awaits cleanly (`await runtime.dispose()` already there).
 
 - [ ] **Step 4: Run tests**
 
@@ -604,7 +604,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/controller.ts src/controller.test.ts src/runtime.ts src/runtime.test.ts
+git add src/controller.ts src/controller.test.ts src/runtime.ts src/runtime.test.ts src/try-it.ts
 git commit -m "feat: deterministic controller shutdown drain"
 ```
 
@@ -617,30 +617,32 @@ git commit -m "feat: deterministic controller shutdown drain"
 
 **Interfaces:**
 - Consumes: `onFinal(text, seq)`, `onInterim(text, seq)`, `onQueueDrained` (Task 2).
-- Produces: `EditorSink` API: `begin()`, `interim(seq, text)`, `commit(seq, text): string`, `submitText(): string`. Rendering = `prefix + committed finals in seq order + the live interim`.
+- Produces: `EditorSink` API: `begin()`, `interim(seq, text)`, `commit(seq, text): string`, `submitText(): string`. Rendering = `prefix + committed finals in seq order + the live interim`. The constructor does **not** change: it stays `constructor(editor: EditorTextAccess)` (`{ get, set }`), matching `makeEditor()` in `src/ui.test.ts`.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```ts
-// src/ui.test.ts — replace the existing EditorSink calls with seq-aware ones
+// src/ui.test.ts — replace the existing EditorSink calls with seq-aware ones.
+// `makeEditor()` and its `peek()`/`type()` helpers are already defined in this file,
+// and the EditorSink constructor keeps its real `EditorTextAccess { get, set }` shape.
 test("renders finals in sequence order even when they commit out of order", () => {
-	const editor = { text: "note: " };
+	const editor = makeEditor("note: ");
 	const sink = new EditorSink(editor);
 	sink.begin();
 	sink.interim(1, "live words");
 	sink.commit(0, "first");
-	expect(editor.text).toBe("note: first\nlive words");
+	expect(editor.peek()).toBe("note: first\nlive words");
 	sink.commit(1, "final words");
-	expect(editor.text).toBe("note: final words");
+	expect(editor.peek()).toBe("note: final words");
 });
 
 test("adopts user typing between finals instead of overwriting it", () => {
-	const editor = { text: "" };
+	const editor = makeEditor("");
 	const sink = new EditorSink(editor);
 	sink.begin();
-	editor.text = "typed by hand";
+	editor.type("typed by hand");
 	sink.commit(0, "from speech");
-	expect(editor.text).toBe("typed by hand\nfrom speech");
+	expect(editor.peek()).toBe("typed by hand\nfrom speech");
 	expect(sink.submitText()).toBe("typed by hand\nfrom speech");
 });
 ```
@@ -686,7 +688,7 @@ test("signals a drained queue exactly once", async () => {
 Run: `bun test src/ui.test.ts src/controller.test.ts -t "EditorSink"`
 Expected: FAIL — `sink.interim` does not exist; interims are emitted while a job is pending.
 
-- [ ] **Step 3: Implement** `EditorSink` with a `finals: Map<number, string>` and `live?: { seq: number; text: string }`, preserving `refreshPrefix()`'s user-typing adoption. In the controller, suppress `onInterim` (store `session.pendingInterim` but do not call the hook) whenever `this.jobs.length + this.finished.size > 0`, and never call `onInterim` for a session that is not `active`. Call `onQueueDrained()` from `settle()` only on the transition to `queueDepth === 0` when at least one final was emitted since the previous drain. In `src/runtime.ts`: `onInterim: (text, seq) => editor.interim(seq, text)`, `onFinal: (text, seq) => { editor.commit(seq, text); }`, and `onQueueDrained: () => { if (settings.submitOnStop) pi.sendUserMessage(editor.submitText()); }`.
+- [ ] **Step 3: Implement** `EditorSink` with a `finals: Map<number, string>` and `live?: { seq: number; text: string }`, preserving `refreshPrefix()`'s user-typing adoption. `begin()` captures the editor's current text as `prefix` and clears `lastWritten`/`live` **only when `finals` is empty**. The runtime calls `begin()` on `state === "recording" || state === "arming"`, which now also fires mid-queue, so a `begin()` while jobs are still pending must **not** clear `finals` and must not re-capture `prefix` — otherwise already-committed text would be dropped or written twice. A press mid-queue therefore keeps the pending finals, renders the new session's interim after them, and text the user typed between finals is still adopted because `refreshPrefix()` runs on every `interim`/`commit`. `submitText()` returns `prefix` + finals in seq order + the live interim, and clears `finals` after a submit. In the controller, suppress `onInterim` (store `session.pendingInterim` but do not call the hook) whenever `this.jobs.length + this.finished.size > 0`, and never call `onInterim` for a session that is not `active`. Call `onQueueDrained()` from `emitReady()` only on the transition to `queueDepth === 0` when at least one final was emitted since the previous drain. In `src/runtime.ts`: `onInterim: (text, seq) => editor.interim(seq, text)`, `onFinal: (text, seq) => { editor.commit(seq, text); }`, and `onQueueDrained: () => { if (settings.submitOnStop) pi.sendUserMessage(editor.submitText()); }`.
 
 - [ ] **Step 4: Run tests**
 
@@ -705,7 +707,7 @@ git commit -m "feat: sequence-aware editor sink and one submit per drain"
 ### Task 8: Queue depth in the status line
 
 **Files:**
-- Modify: `src/ui.ts`, `src/ui.test.ts`, `src/runtime.ts`
+- Modify: `src/ui.ts`, `src/ui.test.ts`, `src/runtime.ts` — `statusText` queue depth plus the `onNotice` wiring.
 
 **Interfaces:**
 - Consumes: `VoiceController.queueDepth` (Task 2), `VoiceState` with `"queued"`.
@@ -733,7 +735,7 @@ test("names the backend and model in every state", () => {
 Run: `bun test src/ui.test.ts -t "pending"`
 Expected: FAIL — `statusText` ignores the third argument; `"queued"` is not in the union.
 
-- [ ] **Step 3: Implement** the third parameter (pluralised `recording`/`recordings`; while `recording`, `N queued` appended when `N > 1`), keeping the existing copy for depth ≤ 1. In `src/runtime.ts` `onState`, pass `controller.queueDepth`.
+- [ ] **Step 3: Implement** the third parameter (pluralised `recording`/`recordings`; while `recording`, `N queued` appended when `N > 1`), keeping the existing copy for depth ≤ 1. In `src/runtime.ts` `onState`, pass `controller.queueDepth`. Also wire `onNotice: (message, level) => ctx.ui.notify(message, level)` beside the existing `onError` in the hooks, so a queue-full refusal (Task 5 raises it) actually reaches the user.
 
 - [ ] **Step 4: Run tests**
 
@@ -1073,7 +1075,7 @@ test("hard-cuts at maxSeconds when there is no pause", () => {
 Run: `bun test src/backends/vad.test.ts`
 Expected: FAIL — `Cannot find module "./vad.ts"`.
 
-- [ ] **Step 3: Implement** the three functions by porting `@earendil-works/pi-voice`'s `speechSegments`/`cutCandidates`/`planCuts` (MIT; attribute the source and `cjpais/Handy`'s `SmoothedVad` in the header comment, per `docs/future/2026-10-16-silero-vad-chunking.md`). Smoothing is out of scope for the pure functions: they take probabilities and return offsets.
+- [ ] **Step 3: Implement** the three functions from the algorithm recorded in `docs/future/2026-10-16-silero-vad-chunking.md` — that document is the source of record, because `@earendil-works/pi-voice`'s `src/vad.ts` is not available locally. It reproduces `speechSegments`/`cutCandidates`/`planCuts` (MIT; attribute `@earendil-works/pi-voice` 0.2.0 and `cjpais/Handy`'s `SmoothedVad` in the header comment). Smoothing is out of scope for the pure functions: they take probabilities and return offsets.
 
 - [ ] **Step 4: Run tests**
 
@@ -1089,7 +1091,7 @@ git commit -m "feat: port silero speech segmentation and cut planning"
 
 ---
 
-### Task 15: `PauseDetector` + `LevelPauseDetector` (behaviour-preserving refactor)
+### Task 15: `PauseDetector` + `createLevelPauseDetector` (behaviour-preserving refactor)
 
 **Files:**
 - Create: `src/backends/pause-detector.ts`, `src/backends/pause-detector.test.ts`
@@ -1141,7 +1143,7 @@ test("returns no cut when the level barely varies", () => {
 Run: `bun test src/backends/pause-detector.test.ts`
 Expected: FAIL — module missing.
 
-- [ ] **Step 3: Implement** `LevelPauseDetector` by moving `ParakeetBatchStream`'s level buffer, `pauseThreshold()` and `cutIfReady()` scan into it. Change `ParakeetBatchStream` to hold a `PauseDetector`, call `detector.push(pcm)` in `feed()` and `detector.cuts(this.bytes)` in `cutIfReady()`. All existing `src/backends/parakeet.test.ts` behaviour must stay green (the heuristic moved, not changed).
+- [ ] **Step 3: Implement** `createLevelPauseDetector` by moving `ParakeetBatchStream`'s level buffer, `pauseThreshold()` and `cutIfReady()` scan into it. Change `ParakeetBatchStream` to hold a `PauseDetector`, call `detector.push(pcm)` in `feed()` and `detector.cuts(this.bytes)` in `cutIfReady()`. All existing `src/backends/parakeet.test.ts` behaviour must stay green (the heuristic moved, not changed).
 
 - [ ] **Step 4: Run tests**
 
@@ -1157,14 +1159,14 @@ git commit -m "refactor: extract PauseDetector behind the RMS heuristic"
 
 ---
 
-### Task 16: `VadPauseDetector`, model provisioning and fallback
+### Task 16: `createVadPauseDetector`, model provisioning and fallback
 
 **Files:**
-- Modify: `src/backends/pause-detector.ts`, `src/backends/pause-detector.test.ts`, `src/backends/parakeet.ts`, `src/backends/parakeet.test.ts`, `src/model-download.ts`, `src/model-download.test.ts`, `src/setup.ts`
+- Modify: `src/backends/pause-detector.ts`, `src/backends/pause-detector.test.ts`, `src/backends/parakeet.ts`, `src/backends/parakeet.test.ts`, `src/model-download.ts`, `src/model-download.test.ts`, `src/setup.ts`, `src/setup.test.ts`
 
 **Interfaces:**
 - Consumes: `VadSession` shape from `transcribe-cpp` (`model.createVadSession({ nThreads: 1 })`, `vadInfo.frameSamples`, `await vad.streamFeed(frame) → { firstFrame, probs }`, `await vad.streamFlush()`), `speechSegments`/`cutCandidates`/`planCuts` (Task 14).
-- Produces: `createVadPauseDetector(session, options): PauseDetector`; `CatalogModel.role?: "asr" | "vad"`; `resolveVadModelPath(): Promise<string | undefined>` in `parakeet.ts` (checks the downloaded catalog dir, then pi-voice's bundled model dir); `ParakeetBackendOptions.vadModelPath?: string | null`.
+- Produces: `createVadPauseDetector(session, options): PauseDetector`; `CatalogModel.role?: "asr" | "vad"`; `resolveVadModelPath(): Promise<string | undefined>` in `parakeet.ts` (reuses the existing scan in that file: `huggingFaceHubDirs()` for the Hugging Face Hub cache and `modelsDir()` for the setup-wizard flat cache, looking for the catalog's Silero VAD gguf); `ParakeetBackendOptions.vadModelPath?: string | null`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1187,6 +1189,11 @@ test("falls back to the level detector when no VAD model is available", async ()
 ```ts
 // src/model-download.test.ts
 test("the picker never offers the VAD model as an ASR model", () => {
+	// Fail-first: the catalog must actually carry a VAD-role Silero entry...
+	const vad = MODEL_CATALOG.find((m) => m.id === "silero-vad-v6.2");
+	expect(vad).toBeDefined();
+	expect(vad?.role).toBe("vad");
+	// ...and ASR-role selection must still exclude it.
 	expect(MODEL_CATALOG.filter((m) => (m.role ?? "asr") === "asr").some((m) => m.id === "silero-vad-v6.2")).toBe(false);
 });
 ```
@@ -1196,7 +1203,7 @@ test("the picker never offers the VAD model as an ASR model", () => {
 Run: `bun test src/backends/pause-detector.test.ts -t "VAD"`
 Expected: FAIL — `createVadPauseDetector` missing.
 
-- [ ] **Step 3: Implement** `VadPauseDetector` (buffer PCM, feed 512-sample frames to the session asynchronously, keep returned probs; `cuts()` runs `speechSegments` + `cutCandidates` + `planCuts` over what has been scored, tolerating probs that lag the buffer). Add the Silero entry to `MODEL_CATALOG` (`role: "vad"`, `streaming: false`), make `isDownloaded`/the setup picker ignore `role === "vad"`, and have `ParakeetBackend.start()` prefer `createVadPauseDetector` when the VAD model resolves and `createVadSession` succeeds, otherwise `createLevelPauseDetector`. Release the VAD session on stream release.
+- [ ] **Step 3: Implement** `createVadPauseDetector` (buffer PCM, feed 512-sample frames to the session asynchronously, keep returned probs; `cuts()` runs `speechSegments` + `cutCandidates` + `planCuts` — ported per `docs/future/2026-10-16-silero-vad-chunking.md`, since pi-voice's `src/vad.ts` is not available locally — over what has been scored, tolerating probs that lag the buffer). Implement `resolveVadModelPath()` by reusing the existing scan in `src/backends/parakeet.ts`: search `huggingFaceHubDirs()` (Hugging Face Hub cache) and `modelsDir()` (setup-wizard flat cache) for the catalog's Silero VAD gguf filename. **Append** the Silero entry to the **end** of `MODEL_CATALOG` (`id: "silero-vad-v6.2"`, `role: "vad"`, `streaming: false`) — `src/setup.test.ts` relies on `MODEL_CATALOG[0]` being the ASR default, so appending keeps that index stable. Make `isDownloaded`/the setup picker ignore `role === "vad"`, and have `ParakeetBackend.start()` prefer `createVadPauseDetector` when the VAD model resolves and `createVadSession` succeeds, otherwise `createLevelPauseDetector`. Release the VAD session on stream release.
 
 - [ ] **Step 4: Run tests**
 
@@ -1206,7 +1213,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/backends/pause-detector.ts src/backends/pause-detector.test.ts src/backends/parakeet.ts src/backends/parakeet.test.ts src/model-download.ts src/model-download.test.ts src/setup.ts
+git add src/backends/pause-detector.ts src/backends/pause-detector.test.ts src/backends/parakeet.ts src/backends/parakeet.test.ts src/model-download.ts src/model-download.test.ts src/setup.ts src/setup.test.ts
 git commit -m "feat: use silero VAD for batch cuts with heuristic fallback"
 ```
 
@@ -1256,17 +1263,56 @@ contract with a test so a later manifest edit cannot silently drop out of discov
   package root (`new URL("../package.json", import.meta.url)`) and assert:
 
 ```ts
-// src/packaging.test.ts
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { expect, test } from "bun:test";
+
+const root = join(import.meta.dir, "..");
+// Host-provided packages the extension is allowed to require.
+const KNOWN_HOST = ["@earendil-works/pi-coding-agent", "@earendil-works/pi-tui"] as const;
+const HOST_IMPORT = new RegExp(`["'](@earendil-works/[^"']+)["']`, "g");
+
+/** @earendil-works/* package names imported by files the manifest ships. */
+function publishedHostImports(): Set<string> {
+	const files = ["index.ts"];
+	const walk = (dir: string): void => {
+		for (const entry of readdirSync(join(root, dir), { withFileTypes: true })) {
+			const rel = join(dir, entry.name);
+			if (entry.isDirectory()) {
+				if (rel !== "src/testing") walk(rel);
+			} else if (entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts")) {
+				files.push(rel);
+			}
+		}
+	};
+	walk("src");
+	const names = new Set<string>();
+	for (const file of files) {
+		const source = readFileSync(join(root, file), "utf8");
+		for (const match of source.matchAll(HOST_IMPORT)) {
+			names.add(match[1]!.split("/").slice(0, 2).join("/"));
+		}
+	}
+	return names;
+}
+
 test("package.json is a discoverable pi package", async () => {
 	const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 	expect(pkg.keywords).toContain("pi-package");
 	expect(Array.isArray(pkg.pi?.extensions) && pkg.pi.extensions.length > 0).toBe(true);
 	for (const entry of pkg.pi.extensions) expect(existsSync(new URL(`../${entry}`, import.meta.url))).toBe(true);
-	// host-provided packages: peerDependencies only, "*" range
+	// host-provided packages: peerDependencies only, "*" range, never dependencies
 	const host = Object.keys(pkg.peerDependencies ?? {}).filter((n) => n.startsWith("@earendil-works/"));
 	expect(host).toContain("@earendil-works/pi-coding-agent");
 	for (const n of host) expect(pkg.peerDependencies[n]).toBe("*");
-	for (const n of host) expect(pkg.dependencies?.[n]).toBeUndefined();
+	// no @earendil-works/* package may be a runtime dependency (iterate the known host list)
+	for (const n of KNOWN_HOST) expect(pkg.dependencies?.[n]).toBeUndefined();
+	// every host import reachable from the published `files` must resolve to a peerDependency
+	for (const name of publishedHostImports()) {
+		expect(pkg.peerDependencies?.[name]).toBe("*");
+		expect(pkg.dependencies?.[name]).toBeUndefined();
+	}
 	// gallery previews + published file allowlist
 	for (const key of ["image", "video"] as const) expect(String(pkg.pi?.[key])).toMatch(/^https:\/\//);
 	for (const f of ["index.ts", "src/", "README.md"]) expect(pkg.files).toContain(f);
