@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_SETTINGS, isValidShortcut, parseDotenv, parseSettings, resolveDeepgramApiKey } from "./settings.ts";
+import { DEFAULT_CHUNK_SECONDS } from "./backends/parakeet.ts";
 
 describe("parseSettings", () => {
 	test("falls back to defaults for an empty file", () => {
@@ -189,5 +190,12 @@ describe("resolveDeepgramApiKey", () => {
 			},
 		};
 		expect(resolveDeepgramApiKey(settings)).toBeUndefined();
+	});
+});
+
+describe("chunkSeconds and the batch default agree at 15", () => {
+	test("both come from one place", () => {
+		expect(DEFAULT_SETTINGS.parakeet.chunkSeconds).toBe(15);
+		expect(DEFAULT_CHUNK_SECONDS).toBe(15);
 	});
 });

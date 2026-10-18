@@ -86,8 +86,9 @@ export const DEFAULT_SETTINGS: VoiceSettings = {
 		mode: "batch",
 		// A target, not a limit: audio is cut at the first real pause at or after
 		// 70% of this, so short and medium dictation arrives in one piece and only
-		// long speech is chunked.
-		chunkSeconds: 30,
+		// long speech is chunked. 15 s costs about 4.4 s to decode at the measured
+		// 3.38 RTF, which halves text latency against a 30 s window.
+		chunkSeconds: 15,
 		// Derived per recording. A fixed number cannot span rooms: one recording
 		// we measured never dropped below 0.05 (music playing) while another
 		// paused around 0.3. Pin a number only to override that.

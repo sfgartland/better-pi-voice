@@ -267,7 +267,7 @@ option for the small models, none of which can stream.
 In batch mode the audio is transcribed in pieces while you are still speaking, so only
 the tail is left when you release the key:
 
-- `parakeet.chunkSeconds` (default 30) is a **target, not a limit**, and only its lower
+- `parakeet.chunkSeconds` (default 15) is a **target, not a limit**, and only its lower
   70% matters: the audio is cut at the **first real pause** at or after that point and
   transcribed in the background. A pause arriving later than the target still triggers a
   cut, and unbroken speech simply grows a longer chunk
@@ -332,7 +332,7 @@ malformed falls back to a default and warns rather than breaking the microphone.
   "parakeet": {
     "modelPath": null,                // null = read pi-voice's config if present
     "mode": "batch",                  // "batch" (faster, chunked) | "streaming"
-    "chunkSeconds": 30,               // cut at a pause near this length; 0 = only at the end
+    "chunkSeconds": 15,               // cut at a pause near this length; 0 = only at the end
     "silenceLevel": "auto",           // "auto" derives the pause threshold per recording; a number pins it
     "idleUnloadMs": 60000,            // hold the model this long after the queue empties; 0 = release at once
     "loadShedRatio": 0.8              // with residency on, release early once load per CPU reaches this

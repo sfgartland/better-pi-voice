@@ -427,7 +427,13 @@ class ParakeetStream implements VoiceStream {
 	}
 }
 
-/** Chunk length for incremental batch transcription. */
+/**
+ * Chunk length for incremental batch transcription.
+ *
+ * A 15 s chunk costs about 4.4 s to decode at the measured 3.38 RTF, which halves
+ * text latency against the old 30 s window. It is a *target*: audio is cut at the
+ * first real pause at or after 70% of it, so unbroken speech still grows past it.
+ */
 export const DEFAULT_CHUNK_SECONDS = 15;
 
 /**
