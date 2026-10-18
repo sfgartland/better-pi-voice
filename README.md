@@ -87,6 +87,10 @@ pi install /path/to/better-pi-voice        # from a local checkout
 pi install npm:@sfgartland/better-pi-voice      # once published
 ```
 
+The npm package is gallery-discoverable: it carries the `pi-package` keyword and
+declares its extension, so `pi install npm:@sfgartland/better-pi-voice` also works from
+the pi package gallery.
+
 Then add a Deepgram key. The easiest way is `/voice key`:
 
 - `/voice key <path-to-dotenv>` — use a key from an existing dotenv file (it checks one is
