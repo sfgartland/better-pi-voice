@@ -122,7 +122,7 @@ export async function runTryIt(ctx: ExtensionContext, settings: VoiceSettings): 
 			return pane;
 		});
 	} finally {
-		controller.dispose();
+		await controller.dispose();
 		await backend.dispose?.();
 	}
 }

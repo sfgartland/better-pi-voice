@@ -114,6 +114,8 @@ export class VoiceController {
 	private state: VoiceState = "idle";
 	/** Guard for the async gap in `begin()`, so two presses open one capture. */
 	private starting = false;
+	/** Set once `dispose()` has drained; nothing may start or emit afterwards. */
+	private disposed = false;
 	private nextSeq = 0;
 	private nextToEmit = 0;
 	/** Finished recordings, oldest first, whose result is not stored yet. */
@@ -144,7 +146,7 @@ export class VoiceController {
 
 	/** Hold mode: key press. Tap mode: toggles. */
 	press(): void {
-		if (this.currentState === "paused") return;
+		if (this.disposed || this.currentState === "paused") return;
 
 		if (this.deps.mode === "tap") {
 			if (this.active) {
@@ -235,18 +237,51 @@ export class VoiceController {
 		this.refreshState();
 	}
 
-	dispose(): void {
+	/**
+	 * Stop making noise and settle every outstanding recording. The contract:
+	 * (1) stop the active capture; (2) wait up to `disposeGraceMs` for in-flight
+	 * jobs; (3) store `""` for anything still unsettled, then emit whatever did
+	 * arrive; (4) leave the breaker closed so the state is `idle`, never
+	 * `paused`; (5) never emit again once this resolves.
+	 */
+	async dispose(): Promise<void> {
+		const active = this.active;
+		if (active && active.phase === "recording") this.finish(active);
 		if (this.active) {
+			// Still arming: no recording to finalize, so abandon it and resolve its
+			// seq immediately.
 			this.endSession(this.active);
 			this.store(this.active, "");
 		}
+
+		if (this.inflight.size > 0) {
+			await Promise.race([Promise.allSettled([...this.inflight]), this.disposeGraceTimer()]);
+		}
+
+		for (const job of [...this.jobs]) {
+			this.endSession(job);
+			this.store(job, this.finalText(job));
+		}
+
+		// Shutdown is not a failure: close the breaker so the derived state is
+		// `idle`, not `paused`.
+		this.failureTimes = [];
+		this.failureHint = undefined;
+		this.emitReady();
+		this.disposed = true;
 		this.refreshState();
+	}
+
+	private disposeGraceTimer(): Promise<void> {
+		return new Promise<void>((resolve) => {
+			this.clock.setTimeout(() => resolve(), this.timings.disposeGraceMs);
+		});
 	}
 
 	// --- session lifecycle -------------------------------------------------
 
 	private async begin(): Promise<void> {
-		if (this.starting) return;
+		if (this.disposed || this.starting) return;
 		this.starting = true;
 		const session = new VoiceSession({
 			seq: this.nextSeq++,
@@ -721,6 +756,7 @@ export class VoiceController {
 		}
 		if (!session.streamWasConnected) {
 			const why = await this.explainConnectionFailure();
+			if (session.abandoned || this.disposed) return;
 			this.deps.hooks?.onError?.(
 				`Voice connection failed.${why ? ` ${why}.` : " Check your network and try again."}`,
 				"connection_failed",

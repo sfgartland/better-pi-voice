@@ -940,3 +940,35 @@ describe("queue", () => {
 		await flush();
 	});
 });
+
+describe("dispose", () => {
+	test("dispose stops the microphone, keeps finished text, and returns despite a hung job", async () => {
+		const gate = deferred<void>();
+		const h = makeHarness({}, { disposeGraceMs: 5_000 });
+		h.backend.plans = [
+			{ finalizeGate: gate.promise, finalOnFinalize: "first" },
+			{ finalOnFinalize: "second" },
+		];
+
+		await start(h);
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+		h.controller.press(); // second recording open while seq 0 hangs
+		await flush();
+		expect(h.capture.startCount).toBe(2);
+
+		const disposing = h.controller.dispose();
+		h.clock.advance(5_000); // grace expires; the hung job is abandoned
+		await disposing;
+
+		expect(h.controller.currentState).toBe("idle");
+		expect(h.controller.queueDepth).toBe(0);
+		expect(h.capture.stopCount).toBe(2);
+		expect(h.finals).toEqual(["second"]); // completed work is not thrown away
+
+		gate.resolve();
+		await flush();
+		expect(h.finals).toEqual(["second"]);
+	});
+});

@@ -239,7 +239,7 @@ export async function createRuntime(
 		dispose: async () => {
 			runtimeDisposed = true;
 			unsubscribeInput?.();
-			controller.dispose();
+			await controller.dispose();
 			await backend.dispose?.();
 			ctx.ui.setWidget(LEVEL_WIDGET_KEY, undefined);
 			ctx.ui.setStatus(STATUS_KEY, undefined);
