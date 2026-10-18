@@ -6,6 +6,47 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-18
+
+### Added
+
+- **Non-destructive recording queue.** Starting a recording while earlier ones are still
+  transcribing no longer drops the new utterance: each recording is queued, transcribed
+  exactly once, and its text is inserted in **recording-start order**, even when calls
+  finish out of order. When the queue is full (4 jobs, or 8 MiB of buffered audio) a new
+  capture is refused with a notice instead of silently discarding audio, and the status
+  line reports the queue depth.
+- **Silero VAD** for batch cuts, behind a new `PauseDetector` interface, with the existing
+  RMS level heuristic as the fallback when the VAD model is unavailable.
+- **Eager batch cuts:** beginning a new recording asks the previous batch tail to transcribe
+  immediately instead of waiting for the chunk target.
+- A `pi-package` contract guard (`src/packaging.test.ts`) plus install/discoverability notes,
+  so the manifest cannot silently drop out of the pi package gallery.
+
+### Changed
+
+- **Sequence-aware transcription plumbing.** `EditorSink` rebuilds `prefix + finals in
+  order + live interim`, suppresses interims while jobs are pending, and submits once per
+  drained queue; `submitOnStop` no longer fires once per final.
+- **Resident local model window** raised to 60 s (`idleUnloadMs` 0 -> 60000), so
+  back-to-back recordings stop reloading the model.
+- **Batch chunk length** settled at 15 s (`chunkSeconds` 30 -> 15), matching
+  `DEFAULT_CHUNK_SECONDS`.
+- **Keyterm budget is per backend:** Deepgram 100 (its cap), local correction 60.
+- `dispose()` is now async and drains stored text on shutdown.
+
+### Fixed
+
+- A recording started during transcription was **silently dropped** (the microphone was
+  never opened and the utterance was lost with no notification). This was the bug the
+  queue replaces.
+- Parakeet sessions are refcounted and `model.transcribe` is serialized, so an
+  unload/dispose can never free the model under a queued job.
+- Failed, empty or hung jobs always free their queue slot via a reap timeout, so one bad
+  job cannot deadlock the queue.
+- Stale Parakeet header comments and the README "not implemented yet" line are corrected.
+- The fresh-install test now polls for the setup file instead of racing a fixed delay.
+
 ## [0.1.1] - 2026-10-16
 
 ### Added
