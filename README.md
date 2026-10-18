@@ -252,8 +252,8 @@ There is **no streaming model lighter than parakeet-0.6b**. The genuinely small 
 `medasr` (128 MB), `parakeet-tdt_ctc-110m` (135 MB), `canary-180m-flash` (218 MB),
 `SenseVoiceSmall` (253 MB), `whisper-small` (270 MB) — are all batch-only, so using one
 means giving up live text and transcribing after you release the key. With batch running
-at 3.5× real-time that is a reasonable trade, and the pipeline already retains the whole
-utterance, but it is not implemented yet.
+at 3.5× real-time that is a reasonable trade, and the pipeline retains the whole
+utterance, chunk-transcribes it while you speak, and finishes the tail when you release.
 
 For non-English dictation, `nemotron-3.5-asr-streaming-0.6b` is the only streaming option
 that is not parakeet, at the same size.
@@ -294,6 +294,23 @@ That last rule is not fussiness. Cutting mid-utterance loses words outright: can
 returns an **empty transcript** for any clip that begins mid-sentence, so a chunk cut at
 merely the *quietest* moment silently discarded everything in it. Requiring real silence
 costs tail latency on unbroken speech instead of costing speech.
+
+### Recording queue
+
+Recordings never block each other. Press the shortcut again while an earlier recording
+is still being transcribed and a new one starts immediately; results are always emitted
+in the order the recordings *started*, even when a later one finishes first.
+
+- one capture at a time; each recording carries a sequence number and its own audio
+- at most **4** recordings may be waiting, and at most **8 MiB** of buffered audio. When
+  either is reached the new press is **refused with a notification** rather than
+  silently dropped
+- a job that never settles is abandoned after `jobReapMs` (default 30 s) so the queue
+  always advances; a recording that produced nothing stores `""` and is skipped, which
+  keeps the order intact
+- the status line shows the depth (`1 recording`, `3 recordings`), so a backlog is
+  visible without opening anything
+- with `submitOnStop`, a drained queue is submitted **once**, not once per recording
 
 ### Keeping the model loaded
 
