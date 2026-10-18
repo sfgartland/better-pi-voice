@@ -246,13 +246,13 @@ export async function availableModels(): Promise<AvailableModel[]> {
 /**
  * Loaded models are held for this long after the last session ends.
  *
- * Zero by default: a warm reload measures about 0.4s for the model this was
- * measured, which is cheaper than holding several hundred megabytes between
- * recordings. Raise it for larger models, where a reload costs enough to be
- * worth the memory. `DEFAULT_LOAD_SHED_RATIO` only has anything to do while
- * this is non-zero, because at zero the memory is already back.
+ * A minute, not zero: a warm reload measures about 0.4 s for the model this was
+ * measured on, but with the recording queue several recordings can land in one
+ * burst, and reloading a 135 MB–700 MB model between each of them is felt.
+ * Residency is released as soon as the queue empties and the window passes, and
+ * the load-shed check below hands the memory back early on a busy machine.
  */
-export const DEFAULT_IDLE_UNLOAD_MS = 0;
+export const DEFAULT_IDLE_UNLOAD_MS = 60_000;
 /** How often to check whether the machine has become busy while idle. */
 export const DEFAULT_LOAD_CHECK_MS = 60_000;
 /** One-minute load average per CPU at which the model is handed back early. */

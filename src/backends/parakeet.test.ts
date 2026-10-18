@@ -95,21 +95,18 @@ describe("model residency", () => {
 		expect(loads()).toBe(1);
 	});
 
-	test("releases the model after every recording by default", async () => {
-		// The shipped default trades a warm reload (measured at ~0.4s) for not
-		// holding several hundred megabytes between recordings.
-		const { backend, loads, fake } = makeBackend();
-
+	test("releases the model one idle minute after the queue empties", async () => {
+		const { backend, clock, fake } = makeBackend(); // now defaults to 60_000
 		await record(backend);
+		clock.advance(59_000);
+		expect(backend.modelLoaded).toBe(true);
+		clock.advance(1_000);
 		expect(backend.modelLoaded).toBe(false);
 		expect(fake.wasDisposed()).toBe(true);
-
-		await record(backend);
-		expect(loads()).toBe(2);
 	});
 
-	test("the built-in default keeps nothing resident", () => {
-		expect(DEFAULT_IDLE_UNLOAD_MS).toBe(0);
+	test("the built-in default holds the model for a minute", () => {
+		expect(DEFAULT_IDLE_UNLOAD_MS).toBe(60_000);
 	});
 
 	test("a new recording cancels a pending unload", async () => {
@@ -475,7 +472,7 @@ describe("startup failures", () => {
 			clock,
 			mode: overrides.mode,
 			chunkSeconds: overrides.chunkSeconds,
-			idleUnloadMs: overrides.idleUnloadMs ?? DEFAULT_IDLE_UNLOAD_MS,
+			idleUnloadMs: overrides.idleUnloadMs ?? 0,
 			loadModel: async () => model as never,
 		});
 		return { backend, clock };

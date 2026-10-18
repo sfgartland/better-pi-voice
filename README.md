@@ -297,19 +297,17 @@ costs tail latency on unbroken speech instead of costing speech.
 
 ### Keeping the model loaded
 
-The model is **released after every recording by default**, because a warm reload is only
-about 0.4 s and holding ~700 MB between recordings is not a good trade on a laptop. Set
-`parakeet.idleUnloadMs` to keep it resident instead — useful for larger models, where a
-reload costs real time. When residency is on, the model is released by whichever of these
-happens first:
+The model is **held for a minute after the last recording by default**
+(`parakeet.idleUnloadMs` is `60000`). Queued recordings arrive in bursts, and a warm
+reload of a 135 MB–700 MB GGUF is felt between each one, so keeping it resident across a
+burst is the better trade. Residency is released by whichever of these happens first:
 
-- the idle window expires (`parakeet.idleUnloadMs`)
+- the idle window expires (`parakeet.idleUnloadMs`; set it to `0` to release as soon as
+  the queue empties)
 - the machine gets busy — one-minute load average per CPU reaching **0.8**
   (`parakeet.loadShedRatio`), checked once a minute
 
 A new recording cancels a pending release, and session shutdown releases immediately.
-Note that the load-shedding half only matters while residency is on: at the default of 0
-the memory is already back after each recording, so there is nothing to shed.
 
 ## Settings
 
@@ -336,7 +334,7 @@ malformed falls back to a default and warns rather than breaking the microphone.
     "mode": "batch",                  // "batch" (faster, chunked) | "streaming"
     "chunkSeconds": 30,               // cut at a pause near this length; 0 = only at the end
     "silenceLevel": "auto",           // "auto" derives the pause threshold per recording; a number pins it
-    "idleUnloadMs": 0,                // 0 = release after each recording (see above)
+    "idleUnloadMs": 60000,            // hold the model this long after the queue empties; 0 = release at once
     "loadShedRatio": 0.8              // with residency on, release early once load per CPU reaches this
   },
   "keyterms": {

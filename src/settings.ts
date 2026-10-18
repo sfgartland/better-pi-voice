@@ -92,10 +92,10 @@ export const DEFAULT_SETTINGS: VoiceSettings = {
 		// we measured never dropped below 0.05 (music playing) while another
 		// paused around 0.3. Pin a number only to override that.
 		silenceLevel: "auto",
-		// Load is fast enough on the machines measured (about 0.4s
-		// warm) that holding ~700MB between recordings is not worth it. The
-		// residency machinery below stays for larger models and other hardware.
-		idleUnloadMs: 0,
+		// Held for a minute, not released immediately: queued recordings arrive in
+		// bursts, and a warm reload of a 135 MB–700 MB model is felt between each
+		// one. The load-shed check hands the memory back early on a busy machine.
+		idleUnloadMs: 60_000,
 		loadShedRatio: 0.8,
 	},
 	keyterms: {
