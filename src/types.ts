@@ -57,6 +57,11 @@ export type VoiceStream = {
 	finalize(): Promise<FinalizeOutcome>;
 	close(): void;
 	isConnected(): boolean;
+	/**
+	 * Optional: transcribe whatever is buffered right now, without waiting for
+	 * a chunk target. A no-op once `finalize()` has started.
+	 */
+	cut?(): void;
 	/** Optional mid-session keyterm update (Deepgram `Configure`). */
 	updateKeyterms?(terms: string[]): void;
 };

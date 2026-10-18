@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { isolateAgentDir } from "../test-support/fake-pi.ts";
 
 const { root } = isolateAgentDir("better-pi-voice-download");
-const { downloadModel, modelsDir } = await import("./model-download.ts");
+const { downloadModel, modelsDir, MODEL_CATALOG } = await import("./model-download.ts");
 
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 beforeEach(() => rmSync(modelsDir(), { recursive: true, force: true }));
@@ -76,5 +76,18 @@ describe("downloadModel", () => {
 		const failing = (async () => new Response("nope", { status: 404 })) as unknown as typeof fetch;
 
 		await expect(downloadModel(model(), { fetch: failing })).rejects.toThrow(/HTTP 404/);
+	});
+});
+
+describe("model catalog", () => {
+	test("the picker never offers the VAD model as an ASR model", () => {
+		// Fail-first: the catalog must actually carry a VAD-role Silero entry...
+		const vad = MODEL_CATALOG.find((m) => m.id === "silero-vad-v6.2");
+		expect(vad).toBeDefined();
+		expect(vad?.role).toBe("vad");
+		// ...and ASR-role selection must still exclude it.
+		expect(MODEL_CATALOG.filter((m) => (m.role ?? "asr") === "asr").some((m) => m.id === "silero-vad-v6.2")).toBe(
+			false,
+		);
 	});
 });

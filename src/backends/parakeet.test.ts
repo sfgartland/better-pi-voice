@@ -2,6 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { deferred } from "../testing/deferred.ts";
 import { pcmOf } from "../testing/fake-capture.ts";
 import { FakeClock } from "../testing/fake-clock.ts";
 import type { VoiceEvent } from "../types.ts";
@@ -46,6 +47,7 @@ function makeBackend(options: { load?: number; idleUnloadMs?: number; loadCheckM
 	let load = options.load ?? 0;
 	const backend = new ParakeetBackend({
 		modelPath: modelFile,
+		vadModelPath: null,
 		clock,
 		idleUnloadMs: options.idleUnloadMs ?? DEFAULT_IDLE_UNLOAD_MS,
 		loadCheckMs: options.loadCheckMs ?? 60_000,
@@ -94,21 +96,18 @@ describe("model residency", () => {
 		expect(loads()).toBe(1);
 	});
 
-	test("releases the model after every recording by default", async () => {
-		// The shipped default trades a warm reload (measured at ~0.4s) for not
-		// holding several hundred megabytes between recordings.
-		const { backend, loads, fake } = makeBackend();
-
+	test("releases the model one idle minute after the queue empties", async () => {
+		const { backend, clock, fake } = makeBackend(); // now defaults to 60_000
 		await record(backend);
+		clock.advance(59_000);
+		expect(backend.modelLoaded).toBe(true);
+		clock.advance(1_000);
 		expect(backend.modelLoaded).toBe(false);
 		expect(fake.wasDisposed()).toBe(true);
-
-		await record(backend);
-		expect(loads()).toBe(2);
 	});
 
-	test("the built-in default keeps nothing resident", () => {
-		expect(DEFAULT_IDLE_UNLOAD_MS).toBe(0);
+	test("the built-in default holds the model for a minute", () => {
+		expect(DEFAULT_IDLE_UNLOAD_MS).toBe(60_000);
 	});
 
 	test("a new recording cancels a pending unload", async () => {
@@ -201,6 +200,7 @@ describe("batch mode", () => {
 		const events: VoiceEvent[] = [];
 		const backend = new ParakeetBackend({
 			modelPath: modelFile,
+			vadModelPath: null,
 			mode: "batch",
 			chunkSeconds: options.chunkSeconds,
 			silenceLevel: options.silenceLevel,
@@ -425,11 +425,36 @@ describe("batch mode", () => {
 		expect(h.recorder.calls[0]).toBe(41 * HUNDRED_MS);
 	});
 
+	test("cut() transcribes the buffered tail immediately", async () => {
+		const h = makeBatchBackend({ chunkSeconds: 15 });
+		const stream = await startStream(h);
+
+		// One second buffered, well under the 15 s target: only a cut flushes it.
+		for (let i = 0; i < 10; i++) stream.feed(loud);
+		stream.cut?.();
+		await settle();
+
+		expect(h.recorder.calls).toEqual([10 * HUNDRED_MS]);
+	});
+
+	test("falls back to the level detector when no VAD model is available", async () => {
+		// `vadModelPath: null` (set by makeBatchBackend) means no Silero model, so
+		// the RMS heuristic must still find a pause and cut.
+		const h = makeBatchBackend({ chunkSeconds: 1, silenceLevel: "auto" });
+		const stream = await startStream(h);
+
+		feedSecondWithPause(stream);
+		await settle();
+
+		expect(h.recorder.calls.length).toBe(1);
+	});
+
 	test("close releases the model, so residency can start its timer", async () => {
 		const clock = new FakeClock();
 		const recorder = recordingModel();
 		const backend = new ParakeetBackend({
 			modelPath: modelFile,
+			vadModelPath: null,
 			mode: "batch",
 			clock,
 			idleUnloadMs: 60_000,
@@ -459,10 +484,11 @@ describe("startup failures", () => {
 		const clock = overrides.clock ?? new FakeClock();
 		const backend = new ParakeetBackend({
 			modelPath: modelFile,
+			vadModelPath: null,
 			clock,
 			mode: overrides.mode,
 			chunkSeconds: overrides.chunkSeconds,
-			idleUnloadMs: overrides.idleUnloadMs ?? DEFAULT_IDLE_UNLOAD_MS,
+			idleUnloadMs: overrides.idleUnloadMs ?? 0,
 			loadModel: async () => model as never,
 		});
 		return { backend, clock };
@@ -562,5 +588,140 @@ describe("defaultSystemLoad", () => {
 		const load = defaultSystemLoad();
 		expect(Number.isFinite(load)).toBe(true);
 		expect(load).toBeGreaterThanOrEqual(0);
+	});
+});
+
+describe("session refcounting", () => {
+	type ModelHooks = {
+		transcribe?: (pcm: Float32Array) => Promise<{ text: string }>;
+		onDispose?: () => void;
+	};
+
+	function trackingModel(hooks: ModelHooks = {}) {
+		let disposedCount = 0;
+		const model = {
+			capabilities: { supportsStreaming: true, languages: ["en"], nativeSampleRate: 16_000 },
+			createSession: () => ({
+				stream: async () => ({
+					feed: async () => ({ committedChanged: false, tentativeChanged: false }),
+					finalize: async () => undefined,
+					reset: () => {},
+					get text() {
+						return { full: "", committed: "", tentative: "" };
+					},
+					get snapshot() {
+						return { text: "" };
+					},
+				}),
+				dispose: () => {},
+			}),
+			transcribe: hooks.transcribe ?? (async () => ({ text: "" })),
+			dispose: () => {
+				disposedCount++;
+				hooks.onDispose?.();
+			},
+		};
+		return { model, disposed: () => disposedCount };
+	}
+
+	function makeRefBackend(hooks: ModelHooks = {}, options: { idleUnloadMs?: number } = {}) {
+		const clock = new FakeClock();
+		const tracked = trackingModel(hooks);
+		const backend = new ParakeetBackend({
+			modelPath: modelFile,
+			vadModelPath: null,
+			mode: "batch",
+			chunkSeconds: 1,
+			silenceLevel: "auto",
+			idleUnloadMs: options.idleUnloadMs ?? 0,
+			clock,
+			loadModel: async () => tracked.model as never,
+		});
+		return { backend, clock, ...tracked };
+	}
+
+	const opts = () => ({ language: "en", keyterms: [], signal: new AbortController().signal });
+	const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+	const loud = pcmOf(500, 3200);
+	const silent = pcmOf(0, 3200);
+	function feedPause(stream: { feed(chunk: Buffer): unknown }): void {
+		for (let i = 0; i < 7; i++) stream.feed(loud);
+		for (let i = 0; i < 3; i++) stream.feed(silent);
+	}
+
+	test("does not unload while another session is still transcribing", async () => {
+		const { backend, disposed } = makeRefBackend({}, { idleUnloadMs: 0 });
+		const first = await backend.start(opts(), () => {});
+		const second = await backend.start(opts(), () => {});
+		expect(first).toBeDefined();
+		expect(second).toBeDefined();
+
+		first!.close();
+		// One session is still open: the model must stay resident even at idleUnloadMs 0.
+		expect(backend.modelLoaded).toBe(true);
+		expect(disposed()).toBe(0);
+
+		second!.close();
+		expect(backend.modelLoaded).toBe(false);
+		expect(disposed()).toBe(1);
+	});
+
+	test("dispose during an in-flight transcribe does not free the model", async () => {
+		const gate = deferred<void>();
+		const { backend, disposed } = makeRefBackend(
+			{
+				transcribe: async () => {
+					await gate.promise;
+					return { text: "done" };
+				},
+			},
+			{ idleUnloadMs: 60_000 },
+		);
+		const stream = await backend.start(opts(), () => {});
+		if (!stream) throw new Error("batch backend did not start");
+
+		feedPause(stream);
+		await settle();
+		expect(backend.modelLoaded).toBe(true);
+
+		await backend.dispose();
+		// The transcription is still running, so the model must not be freed yet.
+		expect(backend.modelLoaded).toBe(true);
+		expect(disposed()).toBe(0);
+
+		stream.close();
+		gate.resolve();
+		await settle();
+		await settle();
+
+		expect(backend.modelLoaded).toBe(false);
+		expect(disposed()).toBe(1);
+	});
+
+	test("serializes transcribe calls across concurrent batch streams", async () => {
+		let inFlight = 0;
+		let maxInFlight = 0;
+		const { backend } = makeRefBackend(
+			{
+				transcribe: async () => {
+					inFlight++;
+					maxInFlight = Math.max(maxInFlight, inFlight);
+					await new Promise((resolve) => setTimeout(resolve, 0));
+					inFlight--;
+					return { text: "" };
+				},
+			},
+			{ idleUnloadMs: 60_000 },
+		);
+		const first = await backend.start(opts(), () => {});
+		const second = await backend.start(opts(), () => {});
+		if (!first || !second) throw new Error("batch backend did not start");
+
+		feedPause(first);
+		feedPause(second);
+		await settle();
+		await settle();
+
+		expect(maxInFlight).toBe(1);
 	});
 });

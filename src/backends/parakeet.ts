@@ -21,9 +21,10 @@ import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { type Clock, systemClock, type TimerHandle } from "../clock.ts";
-import { float32ToS16le, levelFromS16le, s16leToFloat32 } from "../formats.ts";
-import { modelsDir } from "../model-download.ts";
+import { float32ToS16le, s16leToFloat32 } from "../formats.ts";
+import { MODEL_CATALOG, modelsDir } from "../model-download.ts";
 import type { FinalizeOutcome, StartOptions, VoiceBackend, VoiceEvent, VoiceStream } from "../types.ts";
+import { createLevelPauseDetector, createVadPauseDetector, type PauseDetector } from "./pause-detector.ts";
 
 type StreamText = { full: string; committed: string; tentative: string };
 type StreamUpdate = {
@@ -47,11 +48,16 @@ type CppStream = {
 	readonly snapshot: CppTranscript;
 };
 type CppSession = { stream(options: Record<string, unknown>): Promise<CppStream>; dispose(): void };
+type CppVadSession = { streamFeed(pcm: Float32Array): Promise<{ probs: number[] }>; dispose(): void };
 type CppModel = {
 	readonly capabilities: { supportsStreaming: boolean; languages: string[]; nativeSampleRate: number };
 	createSession(): CppSession;
 	transcribe(pcm: Float32Array, options?: Record<string, unknown>): Promise<{ text: string }>;
 	dispose(): void;
+	/** Present only on a VAD-role model. */
+	vadInfo?: { frameSamples: number };
+	/** Present only on a VAD-role model. */
+	createVadSession?(options?: { nThreads?: number }): CppVadSession;
 };
 
 /**
@@ -244,15 +250,28 @@ export async function availableModels(): Promise<AvailableModel[]> {
 }
 
 /**
+ * Find the Silero VAD GGUF if it is already on disk, reusing the same scan as
+ * `availableModels`: the Hugging Face Hub cache and the setup wizard's flat
+ * cache. It is usually inherited from pi-voice's bundled model, not downloaded
+ * by this extension.
+ */
+export async function resolveVadModelPath(): Promise<string | undefined> {
+	const entry = MODEL_CATALOG.find((model) => model.role === "vad");
+	if (!entry) return undefined;
+	const models = await availableModels();
+	return models.find((model) => basename(model.path) === entry.filename)?.path;
+}
+
+/**
  * Loaded models are held for this long after the last session ends.
  *
- * Zero by default: a warm reload measures about 0.4s for the model this was
- * measured, which is cheaper than holding several hundred megabytes between
- * recordings. Raise it for larger models, where a reload costs enough to be
- * worth the memory. `DEFAULT_LOAD_SHED_RATIO` only has anything to do while
- * this is non-zero, because at zero the memory is already back.
+ * A minute, not zero: a warm reload measures about 0.4 s for the model this was
+ * measured on, but with the recording queue several recordings can land in one
+ * burst, and reloading a 135 MB–700 MB model between each of them is felt.
+ * Residency is released as soon as the queue empties and the window passes, and
+ * the load-shed check below hands the memory back early on a busy machine.
  */
-export const DEFAULT_IDLE_UNLOAD_MS = 0;
+export const DEFAULT_IDLE_UNLOAD_MS = 60_000;
 /** How often to check whether the machine has become busy while idle. */
 export const DEFAULT_LOAD_CHECK_MS = 60_000;
 /** One-minute load average per CPU at which the model is handed back early. */
@@ -295,6 +314,11 @@ export type ParakeetBackendOptions = {
 	systemLoad?: (() => number) | undefined;
 	/** Injectable for tests, so residency can be exercised without a GGUF. */
 	loadModel?: ((path: string) => Promise<CppModel>) | undefined;
+	/**
+	 * The Silero VAD GGUF to use for pause detection. `undefined` auto-resolves
+	 * from the model caches; `null` disables VAD and uses the level heuristic.
+	 */
+	vadModelPath?: string | null | undefined;
 };
 
 async function defaultLoadModel(path: string): Promise<CppModel> {
@@ -427,7 +451,13 @@ class ParakeetStream implements VoiceStream {
 	}
 }
 
-/** Chunk length for incremental batch transcription. */
+/**
+ * Chunk length for incremental batch transcription.
+ *
+ * A 15 s chunk costs about 4.4 s to decode at the measured 3.38 RTF, which halves
+ * text latency against the old 30 s window. It is a *target*: audio is cut at the
+ * first real pause at or after 70% of it, so unbroken speech still grows past it.
+ */
 export const DEFAULT_CHUNK_SECONDS = 15;
 
 /**
@@ -446,8 +476,8 @@ export const DEFAULT_CHUNK_SECONDS = 15;
 export type BatchStreamOptions = {
 	/** 0 disables incremental chunks and transcribes everything at finalize. */
 	chunkSeconds: number;
-	/** Level at or below which a boundary counts as a real pause. */
-	silenceLevel: number | "auto";
+	/** Decides where a pause is; the backend picks VAD or the level heuristic. */
+	detector: PauseDetector;
 	transcribe(pcm: Float32Array): Promise<string>;
 	emit(event: VoiceEvent): void;
 	/** Called once when the session ends, so residency can be scheduled. */
@@ -466,30 +496,28 @@ const MIN_CHUNK_FRACTION = 0.7;
  * no pause therefore stays in one piece and is transcribed when recording ends.
  */
 const SILENCE_LEVEL = 0.35;
-/** Below this much variation there is no pause to find, so nothing is cut. */
-const MIN_DYNAMIC_RANGE = 0.1;
-/** Where in the noise-to-speech range a boundary stops counting as speech. */
-const PAUSE_RANGE_FRACTION = 0.3;
 
 class ParakeetBatchStream implements VoiceStream {
 	private chunks: Buffer[] = [];
-	private levels: number[] = [];
 	private bytes = 0;
 	private queue: Promise<void> = Promise.resolve();
 	private closed = false;
 	private finalizeStarted = false;
 	private failure: string | undefined;
 	private released = false;
+	private pendingTasks = 0;
 	private readonly chunkBytes: number;
+	private readonly detector: PauseDetector;
 
 	constructor(private readonly options: BatchStreamOptions) {
 		this.chunkBytes = Math.round(options.chunkSeconds * 1000 * BYTES_PER_MS);
+		this.detector = options.detector;
 	}
 
 	feed(pcm: Buffer): void {
 		if (this.closed || this.finalizeStarted) return;
 		this.chunks.push(Buffer.from(pcm));
-		this.levels.push(levelFromS16le(pcm));
+		this.detector.push(pcm);
 		this.bytes += pcm.length;
 		if (this.chunkBytes > 0) this.cutIfReady();
 	}
@@ -511,16 +539,37 @@ class ParakeetBatchStream implements VoiceStream {
 	close(): void {
 		this.closed = true;
 		// The queue may still be transcribing; releasing the model now could dispose
-		// it under an in-flight transcribe. Hand it back once the queue settles.
+		// it under an in-flight transcribe. Hand it back once the queue settles,
+		// or immediately when there is nothing in flight.
+		if (this.pendingTasks === 0) {
+			this.notifyReleased();
+			return;
+		}
 		void this.queue.then(
 			() => this.notifyReleased(),
 			() => this.notifyReleased(),
 		);
 	}
 
+	/**
+	 * Transcribe the buffered tail right now, without waiting for the chunk
+	 * target. A new recording calls this so a queued batch tail starts decoding
+	 * immediately instead of after `chunkSeconds` more audio.
+	 */
+	cut(): void {
+		if (this.finalizeStarted) return;
+		const all = this.takeAll();
+		if (all) this.enqueue(all);
+	}
+
 	private notifyReleased(): void {
 		if (this.released) return;
 		this.released = true;
+		try {
+			this.detector.dispose?.();
+		} catch {
+			// Releasing a VAD session that is already gone is not worth reporting.
+		}
 		this.options.onReleased?.();
 	}
 
@@ -529,77 +578,40 @@ class ParakeetBatchStream implements VoiceStream {
 	}
 
 	/**
-	 * Where a pause starts, derived from this recording rather than from a fixed
-	 * number.
-	 *
-	 * A fixed threshold cannot work across rooms: in our test recordings, one recording
-	 * never dropped below 0.05 (music playing) while another paused around 0.3.
-	 * So the floor and the speech level are taken from the buffer's own level
-	 * distribution and a pause is anything in the lowest part of that range.
-	 *
-	 * When the level barely varies there is no pause structure to find, and this
-	 * returns undefined so nothing is cut. That is the safe answer for unbroken
-	 * speech or steady background noise.
-	 */
-	private pauseThreshold(): number | undefined {
-		const configured = this.options.silenceLevel;
-		if (typeof configured === "number") return configured;
-
-		const levels = this.levels;
-		if (levels.length < 8) return undefined;
-		const sorted = [...levels].sort((a, b) => a - b);
-		// The second-smallest level, not a low percentile: pauses are brief, so a
-		// 10th percentile often IS speech. Two silent chunks in forty still yields a
-		// zero floor, whereas the percentile reported 1.00 and found no pause
-		// at all. Taking the second rather than the smallest ignores one stray click.
-		const noise = sorted[1]!;
-		const speech = sorted[Math.floor(0.75 * (sorted.length - 1))]!;
-		const range = speech - noise;
-		if (range < MIN_DYNAMIC_RANGE) return undefined;
-		return noise + PAUSE_RANGE_FRACTION * range;
-	}
-
-	/**
-	 * Cut at the first genuine pause at or after the minimum length.
-	 *
-	 * The search starts at the minimum and runs to the end of what has been
-	 * captured, so the window slides forward. An earlier version searched only the
-	 * span between the minimum and the target length, anchored at the start of the
-	 * buffer: if the first pause fell outside that span, nothing could ever be cut
-	 * again and the whole utterance arrived at the end. Chunk length is therefore
-	 * a target, not a limit, and grows when speech is unbroken.
+	 * Cut at the first genuine pause at or after the minimum length. The
+	 * detector owns the pause logic; this only applies its first answer.
 	 */
 	private cutIfReady(): void {
-		const minKeep = this.chunkBytes * MIN_CHUNK_FRACTION;
-		if (this.bytes < minKeep) return;
-		const threshold = this.pauseThreshold();
-		if (threshold === undefined) return;
-
-		let cumulative = 0;
-		for (let i = 0; i < this.chunks.length; i++) {
-			cumulative += this.chunks[i]!.length;
-			if (cumulative < minKeep) continue;
-			if (this.levels[i]! <= threshold) {
-				this.cutAfter(i);
-				return;
-			}
-		}
+		const cuts = this.detector.cuts(this.bytes);
+		if (cuts.length === 0) return;
+		this.cutAt(cuts[0]!);
 	}
 
-	/** Split the buffer after chunk `index` and transcribe the head. */
-	private cutAfter(index: number): void {
-		const taken = this.chunks.slice(0, index + 1);
-		this.chunks = this.chunks.slice(index + 1);
-		this.levels = this.levels.slice(index + 1);
-		for (const chunk of taken) this.bytes -= chunk.length;
-		this.enqueue(taken.length === 1 ? taken[0]! : Buffer.concat(taken));
+	/** Split the buffer at a byte offset and transcribe the head. */
+	private cutAt(offset: number): void {
+		const head: Buffer[] = [];
+		let taken = 0;
+		while (this.chunks.length > 0 && taken < offset) {
+			const chunk = this.chunks[0]!;
+			if (taken + chunk.length <= offset) {
+				this.chunks.shift();
+				head.push(chunk);
+				taken += chunk.length;
+				continue;
+			}
+			const split = offset - taken;
+			head.push(chunk.subarray(0, split));
+			this.chunks[0] = chunk.subarray(split);
+			taken = offset;
+		}
+		this.bytes -= taken;
+		if (head.length > 0) this.enqueue(head.length === 1 ? head[0]! : Buffer.concat(head));
 	}
 
 	private takeAll(): Buffer | undefined {
 		if (this.bytes === 0) return undefined;
 		const all = this.chunks.length === 1 ? this.chunks[0]! : Buffer.concat(this.chunks);
 		this.chunks = [];
-		this.levels = [];
 		this.bytes = 0;
 		return all;
 	}
@@ -607,6 +619,7 @@ class ParakeetBatchStream implements VoiceStream {
 	/** Chunks are transcribed one at a time, so their text stays in order. */
 	private enqueue(pcm: Buffer): void {
 		const samples = s16leToFloat32(pcm);
+		this.pendingTasks++;
 		this.queue = this.queue
 			.then(async () => {
 				if (this.closed || this.failure) return;
@@ -621,6 +634,9 @@ class ParakeetBatchStream implements VoiceStream {
 					message: `Local transcription failed: ${this.failure}`,
 					code: "local_failed",
 				});
+			})
+			.finally(() => {
+				this.pendingTasks--;
 			});
 	}
 }
@@ -642,9 +658,17 @@ export class ParakeetBackend implements VoiceBackend {
 	readonly model = "parakeet";
 
 	private resolution: Promise<string | undefined> | undefined;
+	private vadResolution: Promise<string | undefined> | undefined;
 	private model_: CppModel | undefined;
 	private idleTimer: TimerHandle | undefined;
 	private loadTimer: TimerHandle | undefined;
+	/** Open streams; the model cannot be freed while this is non-zero. */
+	private activeSessions = 0;
+	/** A release asked to unload while sessions were still alive. */
+	private pendingUnload = false;
+	private disposed = false;
+	/** Serialises `model.transcribe` across concurrent batch streams. */
+	private transcribeChain: Promise<unknown> = Promise.resolve();
 	private readonly clock: Clock;
 	private readonly idleUnloadMs: number;
 	private readonly loadShedRatio: number;
@@ -666,9 +690,14 @@ export class ParakeetBackend implements VoiceBackend {
 
 	/**
 	 * Drop the model and free its memory. Called on the idle timer, when the
-	 * machine is busy, and on shutdown.
+	 * machine is busy, and on shutdown. While any stream is still open the model
+	 * is not touched: freeing it under a running transcription would crash it.
 	 */
 	unload(): void {
+		if (this.activeSessions > 0) {
+			this.pendingUnload = true;
+			return;
+		}
 		this.cancelIdleTimers();
 		const model = this.model_;
 		this.model_ = undefined;
@@ -680,7 +709,25 @@ export class ParakeetBackend implements VoiceBackend {
 	}
 
 	async dispose(): Promise<void> {
+		this.disposed = true;
+		// Returns immediately; the last session release performs the unload.
 		this.unload();
+	}
+
+	/** A stream has ended: free the model once the last one is gone. */
+	private onSessionReleased(): void {
+		if (this.activeSessions > 0) this.activeSessions--;
+		if (this.activeSessions > 0) return;
+		this.scheduleIdleUnload();
+	}
+
+	/** All `transcribe` calls go through one chain, so the shared model is never
+	 * asked to run two batches at once. */
+	private serializeTranscribe<T>(task: () => Promise<T>): Promise<T> {
+		const run = this.transcribeChain.then(task, task);
+		// Keep the chain alive after a rejection so the next call still runs.
+		this.transcribeChain = run.catch(() => undefined);
+		return run;
 	}
 
 	private cancelIdleTimers(): void {
@@ -697,6 +744,12 @@ export class ParakeetBackend implements VoiceBackend {
 	/** A session has ended: hold the model briefly, then let it go. */
 	private scheduleIdleUnload(): void {
 		this.cancelIdleTimers();
+		if (this.pendingUnload || this.disposed) {
+			// Shutdown was requested while a session was alive; honour it now.
+			this.pendingUnload = false;
+			this.unload();
+			return;
+		}
 		if (!this.model_) return;
 		if (this.idleUnloadMs <= 0) {
 			this.unload();
@@ -734,6 +787,54 @@ export class ParakeetBackend implements VoiceBackend {
 		return this.resolution;
 	}
 
+	private resolveVadPath(): Promise<string | undefined> {
+		if (this.options.vadModelPath !== undefined) return Promise.resolve(this.options.vadModelPath ?? undefined);
+		this.vadResolution ??= resolveVadModelPath();
+		return this.vadResolution;
+	}
+
+	/**
+	 * The batch cutter: Silero VAD when a VAD model can be loaded, the RMS level
+	 * heuristic otherwise. The fallback keeps the local backend working on a
+	 * machine that has only the ASR GGUF.
+	 */
+	private async createBatchDetector(chunkSeconds: number, silenceLevel: number | "auto"): Promise<PauseDetector> {
+		const levelOptions = {
+			chunkSeconds,
+			minChunkFraction: MIN_CHUNK_FRACTION,
+			silenceLevel,
+			bytesPerSecond: BYTES_PER_MS * 1000,
+		};
+		const path = await this.resolveVadPath();
+		if (!path) return createLevelPauseDetector(levelOptions);
+		try {
+			const vadModel = await this.loadModel(path);
+			const frameSamples = vadModel.vadInfo?.frameSamples;
+			if (!frameSamples || !vadModel.createVadSession) throw new Error("model does not serve the vad role");
+			const vadSession = vadModel.createVadSession({ nThreads: 1 });
+			const detector = createVadPauseDetector(vadSession, {
+				frameSamples,
+				chunkSeconds,
+				minChunkFraction: MIN_CHUNK_FRACTION,
+				bytesPerSecond: BYTES_PER_MS * 1000,
+			});
+			return {
+				...detector,
+				dispose: () => {
+					detector.dispose?.();
+					try {
+						vadModel.dispose();
+					} catch {
+						// Disposing a model that is already gone is not worth reporting.
+					}
+				},
+			};
+		} catch {
+			// No VAD model, or it cannot score: keep working with the heuristic.
+			return createLevelPauseDetector(levelOptions);
+		}
+	}
+
 	async checkAvailability(): Promise<{ available: boolean; reason?: string }> {
 		const path = await this.resolvePath();
 		if (!path) {
@@ -756,6 +857,7 @@ export class ParakeetBackend implements VoiceBackend {
 	}
 
 	async start(options: StartOptions, emit: (event: VoiceEvent) => void): Promise<VoiceStream | undefined> {
+		this.disposed = false;
 		const path = await this.resolvePath();
 		if (!path) return undefined;
 
@@ -782,12 +884,16 @@ export class ParakeetBackend implements VoiceBackend {
 		if (this.mode === "batch") {
 			// Chunked, so text arrives while the user is still speaking; only the
 			// tail is left to transcribe when the recording stops.
+			const chunkSeconds = this.options.chunkSeconds ?? DEFAULT_CHUNK_SECONDS;
+			const detector = await this.createBatchDetector(chunkSeconds, this.options.silenceLevel ?? SILENCE_LEVEL);
+			this.activeSessions++;
 			return new ParakeetBatchStream({
-				chunkSeconds: this.options.chunkSeconds ?? DEFAULT_CHUNK_SECONDS,
-				silenceLevel: this.options.silenceLevel ?? SILENCE_LEVEL,
+				chunkSeconds,
+				detector,
 				emit,
-				onReleased: () => this.scheduleIdleUnload(),
-				transcribe: async (pcm) => (await model.transcribe(pcm, { language, timestamps: "none" })).text,
+				onReleased: () => this.onSessionReleased(),
+				transcribe: (pcm) =>
+					this.serializeTranscribe(async () => (await model.transcribe(pcm, { language, timestamps: "none" })).text),
 			});
 		}
 
@@ -814,7 +920,8 @@ export class ParakeetBackend implements VoiceBackend {
 				commitPolicy: "stable_prefix" as const,
 				stablePrefixAgreementN: STABLE_PREFIX_AGREEMENT,
 			});
-			return new ParakeetStream(stream, session, emit, () => this.scheduleIdleUnload());
+			this.activeSessions++;
+			return new ParakeetStream(stream, session, emit, () => this.onSessionReleased());
 		} catch (error) {
 			// A session that was created but whose stream failed must still be freed.
 			session?.dispose();

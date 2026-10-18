@@ -66,7 +66,8 @@ export type ModelChoice = { label: string; model?: CatalogModel; path?: string }
 /** The Parakeet model menu: catalog entries (with their download size) first, then local files. */
 export function modelChoices(local: AvailableModel[]): ModelChoice[] {
 	const choices: ModelChoice[] = [];
-	for (const model of MODEL_CATALOG) {
+	// A VAD model is not an ASR model; it must never be offered here.
+	for (const model of MODEL_CATALOG.filter((entry) => (entry.role ?? "asr") === "asr")) {
 		const present = local.find((entry) => entry.path.endsWith(model.filename));
 		const status = present ? "on disk" : `download ${formatSize(model.size)}`;
 		const star = model.recommended ? " ★ recommended" : "";

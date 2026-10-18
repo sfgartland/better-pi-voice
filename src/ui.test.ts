@@ -50,7 +50,7 @@ describe("EditorSink", () => {
 		const editor = makeEditor("fix this bug");
 		const sink = new EditorSink(editor);
 		sink.begin();
-		expect(sink.commit("and then the other one")).toBe("fix this bug\nand then the other one");
+		expect(sink.commit(0, "and then the other one")).toBe("fix this bug\nand then the other one");
 		expect(editor.peek()).toBe("fix this bug\nand then the other one");
 	});
 
@@ -58,15 +58,15 @@ describe("EditorSink", () => {
 		const editor = makeEditor("");
 		const sink = new EditorSink(editor);
 		sink.begin();
-		expect(sink.commit("hello")).toBe("hello");
+		expect(sink.commit(0, "hello")).toBe("hello");
 	});
 
 	test("replaces its own interim text rather than appending to it", () => {
 		const editor = makeEditor("");
 		const sink = new EditorSink(editor);
 		sink.begin();
-		sink.showInterim("hello");
-		sink.showInterim("hello world");
+		sink.showInterim(0, "hello");
+		sink.showInterim(0, "hello world");
 		expect(editor.peek()).toBe("hello world");
 	});
 
@@ -74,8 +74,8 @@ describe("EditorSink", () => {
 		const editor = makeEditor("");
 		const sink = new EditorSink(editor);
 		sink.begin();
-		sink.showInterim("hello wor");
-		expect(sink.commit("hello world")).toBe("hello world");
+		sink.showInterim(0, "hello wor");
+		expect(sink.commit(0, "hello world")).toBe("hello world");
 		expect(editor.peek()).toBe("hello world");
 	});
 
@@ -83,10 +83,10 @@ describe("EditorSink", () => {
 		const editor = makeEditor("");
 		const sink = new EditorSink(editor);
 		sink.begin();
-		sink.showInterim("first phrase");
+		sink.showInterim(0, "first phrase");
 		// The user keeps typing while the transcript updates.
 		editor.type(" my own words");
-		sink.showInterim("second phrase");
+		sink.showInterim(0, "second phrase");
 		expect(editor.peek()).toContain("my own words");
 		expect(editor.peek()).toContain("second phrase");
 	});
@@ -96,14 +96,14 @@ describe("EditorSink", () => {
 		const sink = new EditorSink(editor);
 		sink.begin();
 		editor.type("(mine) ");
-		expect(sink.commit("from speech")).toBe("note: (mine) \nfrom speech");
+		expect(sink.commit(0, "from speech")).toBe("note: (mine) \nfrom speech");
 	});
 
 	test("empty text leaves the editor untouched", () => {
 		const editor = makeEditor("keep me");
 		const sink = new EditorSink(editor);
 		sink.begin();
-		expect(sink.commit("   ")).toBe("keep me");
+		expect(sink.commit(0, "   ")).toBe("keep me");
 		expect(editor.peek()).toBe("keep me");
 	});
 
@@ -111,19 +111,46 @@ describe("EditorSink", () => {
 		const editor = makeEditor("first session");
 		const sink = new EditorSink(editor);
 		sink.begin();
-		sink.commit("done");
+		sink.commit(0, "done");
 
 		editor.set("second session");
 		sink.begin();
-		expect(sink.commit("again")).toBe("second session\nagain");
+		expect(sink.commit(0, "again")).toBe("second session\nagain");
 		expect(editor.peek()).toBe("second session\nagain");
+	});
+
+	test("renders finals in sequence order even when they commit out of order", () => {
+		const editor = makeEditor("note: ");
+		const sink = new EditorSink(editor);
+		sink.begin();
+		sink.showInterim(1, "live words");
+		sink.commit(0, "first");
+		expect(editor.peek()).toBe("note: first\nlive words");
+		sink.commit(1, "final words");
+		expect(editor.peek()).toBe("note: final words");
+	});
+
+	test("adopts user typing between finals instead of overwriting it", () => {
+		const editor = makeEditor("");
+		const sink = new EditorSink(editor);
+		sink.begin();
+		editor.type("typed by hand");
+		sink.commit(0, "from speech");
+		expect(editor.peek()).toBe("typed by hand\nfrom speech");
+		expect(sink.submitText()).toBe("typed by hand\nfrom speech");
 	});
 });
 
 describe("statusText", () => {
+	test("shows how many recordings are still pending", () => {
+		expect(statusText("processing", "deepgram nova-3", 1)).toContain("1 recording");
+		expect(statusText("queued", "deepgram nova-3", 3)).toContain("3 recordings");
+		expect(statusText("recording", "deepgram nova-3", 2)).toContain("2 queued");
+	});
+
 	test("names the backend and model in every state", () => {
 		const label = "deepgram nova-3";
-		for (const state of ["idle", "arming", "recording", "processing", "paused"] as const) {
+		for (const state of ["idle", "arming", "recording", "processing", "queued", "paused"] as const) {
 			expect(statusText(state, label)).toContain(label);
 		}
 	});

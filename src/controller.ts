@@ -12,14 +12,14 @@
  * is testable without sleeping.
  */
 
-import type { Capture, CaptureSession } from "./capture.ts";
-import { type Clock, systemClock, type TimerHandle } from "./clock.ts";
-import { AUDIO_SIGNAL_THRESHOLD, AudioRecorder, FrameCoalescer, LevelRing, levelFromS16le } from "./formats.ts";
+import type { Capture } from "./capture.ts";
+import { type Clock, systemClock } from "./clock.ts";
 import { type CorrectionMode, correctTranscript } from "./keyterms/correct.ts";
 import type { KeytermSet } from "./keyterms/index.ts";
+import { type SessionTimer, VoiceSession } from "./session.ts";
 import type { FinalizeOutcome, VoiceBackend, VoiceEvent, VoiceStream } from "./types.ts";
 
-export type VoiceState = "idle" | "arming" | "recording" | "processing" | "paused";
+export type VoiceState = "idle" | "arming" | "recording" | "processing" | "queued" | "paused";
 
 export type ControllerTimings = {
 	/** Hold mode: if no auto-repeat arrives in this window, arm the release timer. */
@@ -36,6 +36,14 @@ export type ControllerTimings = {
 	breakerThreshold: number;
 	/** How much audio to retain for a possible replay. */
 	maxBufferedAudioMs: number;
+	/** Recordings that may be queued for transcription before a new press is refused. */
+	maxQueuedJobs: number;
+	/** Total retained queued audio before a new press is refused. */
+	maxQueuedAudioBytes: number;
+	/** A job that has not settled in this long is abandoned so the queue advances. */
+	jobReapMs: number;
+	/** How long `dispose()` waits for in-flight jobs before abandoning them. */
+	disposeGraceMs: number;
 };
 
 export const DEFAULT_TIMINGS: ControllerTimings = {
@@ -47,19 +55,24 @@ export const DEFAULT_TIMINGS: ControllerTimings = {
 	breakerWindowMs: 10_000,
 	breakerThreshold: 3,
 	maxBufferedAudioMs: 120_000,
+	maxQueuedJobs: 4,
+	maxQueuedAudioBytes: 8 * 1024 * 1024,
+	jobReapMs: 30_000,
+	disposeGraceMs: 5_000,
 };
-
-/** 16 kHz mono s16le = 32 bytes per millisecond. */
-const BYTES_PER_MS = 32;
 
 export type ControllerHooks = {
 	onState?(state: VoiceState): void;
-	/** Live text, including the accumulated final text. */
-	onInterim?(text: string): void;
-	/** Committed text for this session, once. */
-	onFinal?(text: string): void;
+	/** Live text, including the accumulated final text, tagged with its recording. */
+	onInterim?(text: string, seq: number): void;
+	/** Committed text for one recording, once, tagged with its recording. */
+	onFinal?(text: string, seq: number): void;
 	onLevel?(levels: number[]): void;
 	onError?(message: string, code: string): void;
+	/** A non-error message for the user, such as a refused recording. */
+	onNotice?(message: string, level: "info" | "warning" | "error"): void;
+	/** Every recording started so far has been emitted. */
+	onQueueDrained?(): void;
 	onDebug?(message: string): void;
 };
 
@@ -75,222 +88,369 @@ export type ControllerDeps = {
 	hooks?: ControllerHooks | undefined;
 };
 
-type TimerName = "retry" | "fallback" | "release" | "silence" | "max";
-
+/**
+ * Controller invariants (keep these true):
+ *
+ * 1. `seq` is assigned from a monotonically increasing `nextSeq` in `begin()`;
+ *    one recording = one seq; seqs are contiguous.
+ * 2. `active` is at most one session. `jobs` holds finished-recording sessions
+ *    that have not stored a result, ordered by `seq` ascending.
+ * 3. Every job eventually stores a result, including `""` (`finished.set`),
+ *    even on error, timeout or an empty transcript.
+ * 4. `finished` only holds seqs `>= nextToEmit`; `emitReady()` loops
+ *    `while (finished.has(nextToEmit))`, emits non-empty text via
+ *    `onFinal(text, seq)` and increments. Because seqs are contiguous and every
+ *    job stores, the loop always terminates and never deadlocks.
+ * 5. `queueDepth = jobs.length + finished.size` (recordings started, not yet
+ *    emitted).
+ * 6. Derived state: `active` -> `active.phase`; else paused (breaker open) ->
+ *    `"paused"`; else `queueDepth === 0` -> `"idle"`; `=== 1` -> `"processing"`;
+ *    `>= 2` -> `"queued"`.
+ * 7. `press()` is allowed from `idle`, `processing` and `queued` (any state with
+ *    no active session); while an active session exists it keeps today's
+ *    hold/tap semantics for that session.
+ */
 export class VoiceController {
 	private state: VoiceState = "idle";
-	/** Bumped on every session boundary; stale async work compares against it. */
-	private generation = 0;
-	private stream: VoiceStream | undefined;
-	private captureSession: CaptureSession | undefined;
-	private readonly coalescer = new FrameCoalescer();
-	private readonly levels = new LevelRing();
-	private readonly audio: AudioRecorder;
+	/** Guard for the async gap in `begin()`, so two presses open one capture. */
+	private starting = false;
+	/** Set once `dispose()` has drained; nothing may start or emit afterwards. */
+	private disposed = false;
+	private nextSeq = 0;
+	private nextToEmit = 0;
+	/** Finished recordings, oldest first, whose result is not stored yet. */
+	private readonly jobs: VoiceSession[] = [];
+	/** Results waiting for their turn to be emitted, by seq. */
+	private readonly finished = new Map<number, string>();
+	private readonly inflight = new Set<Promise<void>>();
+	private active: VoiceSession | undefined;
 	private readonly timings: ControllerTimings;
 	private readonly clock: Clock;
-	private readonly timers: Partial<Record<TimerName, TimerHandle>> = {};
-
-	private transcript = "";
-	/** Latest interim that no final has superseded yet. */
-	private pendingInterim = "";
-	/** Vocabulary the correction pass may repair toward (no seed jargon). */
-	private correctionTerms: string[] = [];
-	private hadAudioSignal = false;
-	private sawTranscript = false;
-	private streamWasConnected = false;
-	private retried = false;
-	private replayed = false;
 	private failureTimes: number[] = [];
 	private failureHint: string | undefined;
-	private sessionStartedAt = 0;
 
 	constructor(private readonly deps: ControllerDeps) {
 		this.clock = deps.clock ?? systemClock;
 		this.timings = { ...DEFAULT_TIMINGS, ...deps.timings };
-		this.audio = new AudioRecorder(this.timings.maxBufferedAudioMs * BYTES_PER_MS);
 	}
 
 	get currentState(): VoiceState {
 		return this.state;
 	}
 
+	/** Recordings started but not yet emitted. */
+	get queueDepth(): number {
+		return this.jobs.length + this.finished.size;
+	}
+
 	/** Hold mode: key press. Tap mode: toggles. */
 	press(): void {
-		if (this.state === "paused") return;
+		if (this.disposed || this.currentState === "paused") return;
 
 		if (this.deps.mode === "tap") {
-			if (this.state === "idle") void this.begin();
-			else if (this.state === "recording") this.finish();
-			return;
-		}
-
-		if (this.state === "idle") {
+			if (this.active) {
+				if (this.active.phase === "recording") this.finish(this.active);
+				return;
+			}
+			if (this.starting) return;
+			if (!this.canAccept()) {
+				this.notifyQueueFull();
+				return;
+			}
 			void this.begin();
-			this.arm("fallback", this.timings.holdRepeatFallbackMs, () => {
-				// Some terminals never send auto-repeat for a held key. Without a
-				// release signal the mic would stay open, so fall back to the
-				// release timer.
-				if (this.state === "recording") {
-					this.debug("hold: no auto-repeat seen, arming release timer");
-					this.armRelease();
-				}
-			});
 			return;
 		}
 
-		if (this.state === "recording") this.onHoldProgress();
+		// Hold mode: an existing session keeps today's hold semantics.
+		if (this.active) {
+			if (this.active.phase === "recording") this.onHoldProgress(this.active);
+			return;
+		}
+		if (this.starting) return;
+		if (!this.canAccept()) {
+			// Refuse before arming the hold fallback: a refused press must leave no
+			// timer behind that could later finish somebody else's session.
+			this.notifyQueueFull();
+			return;
+		}
+		void this.begin();
+		// `begin()` sets `this.active` synchronously; the cast defeats the
+		// control-flow narrowing from the `if (this.active)` above.
+		const session = this.active as VoiceSession | undefined;
+		if (!session) return;
+		this.arm(session, "fallback", this.timings.holdRepeatFallbackMs, () => {
+			// Some terminals never send auto-repeat for a held key. Without a
+			// release signal the mic would stay open, so fall back to the
+			// release timer.
+			if (session.phase === "recording") {
+				this.debug("hold: no auto-repeat seen, arming release timer");
+				this.armRelease(session);
+			}
+		});
+	}
+
+	/** Whether another recording may be queued right now. */
+	private canAccept(): boolean {
+		return this.jobs.length < this.timings.maxQueuedJobs && this.queuedAudioBytes() < this.timings.maxQueuedAudioBytes;
+	}
+
+	private queuedAudioBytes(): number {
+		let total = 0;
+		for (const job of this.jobs) total += job.audio.byteLength;
+		return total;
+	}
+
+	private queueFullMessage(): string {
+		return `Voice queue is full (${String(this.queueDepth)} recordings waiting). Wait for transcription to catch up.`;
+	}
+
+	private notifyQueueFull(): void {
+		this.deps.hooks?.onNotice?.(this.queueFullMessage(), "warning");
 	}
 
 	/** Hold mode: repeated key events from auto-repeat. */
 	repeat(): void {
-		if (this.deps.mode !== "hold" || this.state !== "recording") return;
-		this.onHoldProgress();
+		const session = this.active;
+		if (this.deps.mode !== "hold" || !session || session.phase !== "recording") return;
+		this.onHoldProgress(session);
 	}
 
 	/** Hold mode: key release, where the terminal reports it. */
 	release(): void {
-		if (this.deps.mode !== "hold" || this.state !== "recording") return;
-		this.armRelease();
+		const session = this.active;
+		if (this.deps.mode !== "hold" || !session || session.phase !== "recording") return;
+		this.armRelease(session);
 	}
 
 	/** Discard the session without submitting anything. */
 	cancel(): void {
-		if (this.state === "idle") {
-			// A begin() may be in flight without having changed the state yet, so idle
-			// does not mean there is nothing to cancel: invalidate it.
-			this.generation++;
-			return;
-		}
+		const session = this.active;
+		if (!session) return;
 		this.debug("cancelled");
-		this.generation++;
-		this.endSession();
-		this.setState("idle");
+		this.endSession(session);
+		// The seq was consumed, so it must still resolve ("") or `nextToEmit`
+		// would wait forever for a recording that will never emit.
+		this.store(session, "");
+		this.refreshState();
 	}
 
-	dispose(): void {
-		this.endSession();
-		this.generation++;
-		this.setState("idle");
+	/**
+	 * Stop making noise and settle every outstanding recording. The contract:
+	 * (1) stop the active capture; (2) wait up to `disposeGraceMs` for in-flight
+	 * jobs; (3) store `""` for anything still unsettled, then emit whatever did
+	 * arrive; (4) leave the breaker closed so the state is `idle`, never
+	 * `paused`; (5) never emit again once this resolves.
+	 */
+	async dispose(): Promise<void> {
+		this.disposed = true;
+		const active = this.active;
+		if (active && active.phase === "recording") this.finish(active);
+		if (this.active) {
+			// Still arming: no recording to finalize, so abandon it and resolve its
+			// seq immediately.
+			this.endSession(this.active);
+			this.store(this.active, "");
+		}
+
+		if (this.inflight.size > 0) {
+			await Promise.race([Promise.allSettled([...this.inflight]), this.disposeGraceTimer()]);
+		}
+
+		for (const job of [...this.jobs]) {
+			this.endSession(job);
+			this.store(job, this.finalText(job));
+		}
+
+		// Shutdown is not a failure: close the breaker so the derived state is
+		// `idle`, not `paused`.
+		this.failureTimes = [];
+		this.failureHint = undefined;
+		this.emitReady();
+		this.refreshState();
+	}
+
+	private disposeGraceTimer(): Promise<void> {
+		return new Promise<void>((resolve) => {
+			this.clock.setTimeout(() => resolve(), this.timings.disposeGraceMs);
+		});
 	}
 
 	// --- session lifecycle -------------------------------------------------
 
 	private async begin(): Promise<void> {
-		const generation = ++this.generation;
-		this.resetSession();
-
-		const availability = await this.deps.capture.checkAvailability();
-		if (generation !== this.generation) return;
-		if (!availability.available) {
-			this.fail(availability.reason ?? "Audio recording is not available.", "capture_unavailable");
-			return;
+		if (this.disposed || this.starting) return;
+		// A new recording is starting: any queued batch tail should start decoding
+		// now rather than waiting for more audio that may never come.
+		for (const job of this.jobs) {
+			try {
+				job.stream?.cut?.();
+			} catch {
+				// A closed stream is allowed to refuse.
+			}
 		}
-
-		this.setState("arming");
-		const started = await this.deps.capture.start(
-			(chunk) => this.onData(chunk, generation),
-			() => this.onCaptureEnded(generation),
-		);
-		if (generation !== this.generation) {
-			if (started.ok) started.session.stop();
-			return;
-		}
-		if (!started.ok) {
-			this.fail(started.reason, "capture_failed", { recordFailure: true });
-			return;
-		}
-
-		this.captureSession = started.session;
-		this.sessionStartedAt = this.clock.now();
-		this.setState("recording");
-		this.arm("max", this.timings.maxSessionMs, () => {
-			this.debug("session hit the maximum duration");
-			this.finish();
+		this.starting = true;
+		const session = new VoiceSession({
+			seq: this.nextSeq++,
+			maxBufferedAudioMs: this.timings.maxBufferedAudioMs,
+			clock: this.clock,
 		});
-		this.armSilenceTimer();
+		this.active = session;
+		try {
+			const availability = await this.deps.capture.checkAvailability();
+			if (session.abandoned) return;
+			if (!availability.available) {
+				this.fail(session, availability.reason ?? "Audio recording is not available.", "capture_unavailable");
+				return;
+			}
 
-		const stream = await this.openStream(generation);
-		if (generation !== this.generation) return;
-		if (!stream) {
-			// Ask the backend why, so a local setup says "no model" rather than
-			// "could not connect".
-			const availability = await this.deps.backend
-				.checkAvailability()
-				.catch(() => ({ available: true, reason: undefined as string | undefined }));
-			if (generation !== this.generation) return;
-			this.fail(availability.reason ?? "Could not connect to the voice service.", "connect_failed", {
-				recordFailure: true,
+			session.phase = "arming";
+			this.refreshState();
+			const started = await this.deps.capture.start(
+				(chunk) => this.onData(chunk, session),
+				() => this.onCaptureEnded(session),
+			);
+			if (session.abandoned) {
+				if (started.ok) started.session.stop();
+				return;
+			}
+			if (!started.ok) {
+				this.fail(session, started.reason, "capture_failed", { recordFailure: true });
+				return;
+			}
+
+			session.captureSession = started.session;
+			session.startedAt = this.clock.now();
+			session.phase = "recording";
+			this.refreshState();
+			this.arm(session, "max", this.timings.maxSessionMs, () => {
+				this.debug("session hit the maximum duration");
+				this.finish(session);
 			});
-			return;
+			this.armSilenceTimer(session);
+
+			const stream = await this.openStream(session);
+			if (session.abandoned) return;
+			if (!stream) {
+				// Ask the backend why, so a local setup says "no model" rather than
+				// "could not connect".
+				const availability = await this.deps.backend
+					.checkAvailability()
+					.catch(() => ({ available: true, reason: undefined as string | undefined }));
+				if (session.abandoned) return;
+				this.fail(session, availability.reason ?? "Could not connect to the voice service.", "connect_failed", {
+					recordFailure: true,
+				});
+				return;
+			}
+			this.flushUnsentAudio(session);
+		} finally {
+			this.starting = false;
 		}
-		this.flushUnsentAudio(generation);
 	}
 
-	private async openStream(generation: number): Promise<VoiceStream | undefined> {
+	private async openStream(session: VoiceSession): Promise<VoiceStream | undefined> {
 		let set: KeytermSet = { bias: [], correct: [], truncated: false };
 		try {
 			set = await this.deps.keyterms();
 		} catch (error) {
 			this.debug(`keyterm mining failed: ${String(error)}`);
 		}
-		if (generation !== this.generation) return undefined;
-		this.correctionTerms = set.correct;
+		if (session.abandoned) return undefined;
+		session.correctionTerms = set.correct;
 
 		const stream = await this.deps.backend.start(
 			{ language: this.deps.language, keyterms: set.bias, signal: new AbortController().signal },
-			(event) => this.onEvent(event, generation),
+			(event) => this.onEvent(event, session),
 		);
 		if (!stream) return undefined;
-		this.stream = stream;
+		session.stream = stream;
 		// Never clear a flag set by an earlier connection in this session.
-		this.streamWasConnected ||= stream.isConnected();
+		session.streamWasConnected ||= stream.isConnected();
 		return stream;
 	}
 
-	private finish(): void {
-		if (this.state !== "recording") return;
-		this.clearSessionTimers();
-		this.captureSession?.stop();
-		this.captureSession = undefined;
-		this.setState("processing");
-		const generation = this.generation;
-		void this.process(generation);
+	private finish(session: VoiceSession | undefined): void {
+		if (session?.phase !== "recording") return;
+		session.clearTimers();
+		session.captureSession?.stop();
+		session.captureSession = undefined;
+		session.phase = "processing";
+		this.jobs.push(session);
+		if (this.active === session) this.active = undefined;
+		this.refreshState();
+		this.track(this.processJob(session));
 	}
 
-	private async process(generation: number): Promise<void> {
+	private track(promise: Promise<void>): void {
+		this.inflight.add(promise);
+		void promise.finally(() => {
+			this.inflight.delete(promise);
+		});
+	}
+
+	private async processJob(session: VoiceSession): Promise<void> {
+		// A job that never settles (a hung backend) must not stall the queue
+		// forever, so it is reaped after `jobReapMs` and stores whatever it has.
+		this.armReap(session);
+		try {
+			await this.process(session);
+		} catch (error) {
+			this.debug(`job failed: ${String(error)}`);
+		} finally {
+			try {
+				session.stream?.close();
+			} catch {
+				// Already closed is fine.
+			}
+			session.stream = undefined;
+			this.store(session, this.finalText(session));
+		}
+	}
+
+	private armReap(session: VoiceSession): void {
+		this.arm(session, "reap", this.timings.jobReapMs, () => {
+			if (session.stored) return;
+			this.debug(`job reaped after ${this.timings.jobReapMs}ms`);
+			try {
+				session.stream?.close();
+			} catch {
+				// Already closed is fine.
+			}
+			session.stream = undefined;
+			this.store(session, this.finalText(session));
+		});
+	}
+
+	private async process(session: VoiceSession): Promise<void> {
 		// Flush the coalescer tail so the final words are not stranded in a
 		// partial frame.
-		this.flushTail(generation);
+		this.flushTail(session);
 
-		const outcome = await this.finalizeStream();
-		if (generation !== this.generation) return;
+		const outcome = await this.finalizeStream(session);
+		if (session.abandoned) return;
 
 		// The stream died without confirming what it had. We still hold the audio,
 		// so replay it once on a fresh connection rather than losing the utterance.
-		if (!this.transcript.trim() && this.isUnconfirmed(outcome) && this.canReplay()) {
+		if (!session.transcript.trim() && this.isUnconfirmed(outcome) && this.canReplay(session)) {
 			this.debug(`stream unconfirmed (${outcome}); replaying buffered audio`);
-			this.replayed = true;
-			if (await this.replayBuffer(generation)) {
-				if (generation !== this.generation) return;
-				this.emitTranscript();
-				this.finishSession();
+			session.replayed = true;
+			if (await this.replayBuffer(session)) {
+				if (session.abandoned) return;
 				return;
 			}
-			if (generation !== this.generation) return;
+			if (session.abandoned) return;
 		}
 
 		// No endpoint ever arrived, so the last thing we heard exists only as an
 		// interim. A slightly provisional word beats a silently dropped sentence.
-		this.promoteInterim();
-		this.emitTranscript();
-		await this.reportEmpty();
-		this.finishSession();
+		this.promoteInterim(session);
+		await this.reportEmpty(session);
 	}
 
-	private async finalizeStream(): Promise<FinalizeOutcome> {
-		const stream = this.stream;
+	private async finalizeStream(session: VoiceSession): Promise<FinalizeOutcome> {
+		const stream = session.stream;
 		if (!stream) return "already_closed";
-		this.noteConnected();
+		this.noteConnected(session);
 		try {
 			return await stream.finalize();
 		} catch (error) {
@@ -299,7 +459,7 @@ export class VoiceController {
 		} finally {
 			// The socket may have finished connecting while finalize was waiting; that
 			// still counts for the replay decision.
-			this.noteConnected();
+			this.noteConnected(session);
 		}
 	}
 
@@ -307,130 +467,145 @@ export class VoiceController {
 	 * Re-feed the retained audio into a brand-new stream. The old stream is
 	 * closed first so its finalize cannot race this one.
 	 */
-	private async replayBuffer(generation: number): Promise<boolean> {
-		const audio = this.audio.all();
+	private async replayBuffer(session: VoiceSession): Promise<boolean> {
+		const audio = session.audio.all();
 		if (!audio) return false;
 		try {
-			this.stream?.close();
+			session.stream?.close();
 		} catch {
 			// Closing a dead socket is allowed to fail.
 		}
-		this.stream = undefined;
+		session.stream = undefined;
 
-		const stream = await this.openStream(generation);
-		if (generation !== this.generation || !stream) return false;
+		const stream = await this.openStream(session);
+		if (session.abandoned || !stream) return false;
 
-		this.transcript = "";
-		this.pendingInterim = "";
-		this.sawTranscript = false;
-		this.feedBuffer(stream, audio);
-		this.audio.markAllSent();
-		this.flushTail(generation);
+		session.transcript = "";
+		session.pendingInterim = "";
+		session.sawTranscript = false;
+		this.feedBuffer(session, stream, audio);
+		session.audio.markAllSent();
+		this.flushTail(session);
 
-		const outcome = await this.finalizeStream();
-		if (generation !== this.generation) return false;
+		const outcome = await this.finalizeStream(session);
+		if (session.abandoned) return false;
 		this.debug(`replay finished with ${outcome}`);
-		return this.transcript.trim().length > 0;
+		return session.transcript.trim().length > 0;
 	}
 
 	/** Record that the stream reached OPEN at least once, for replay decisions. */
-	private noteConnected(): void {
-		if (!this.streamWasConnected && this.stream?.isConnected()) this.streamWasConnected = true;
+	private noteConnected(session: VoiceSession): void {
+		if (!session.streamWasConnected && session.stream?.isConnected()) session.streamWasConnected = true;
 	}
 
 	private isUnconfirmed(outcome: FinalizeOutcome): boolean {
 		return outcome === "timeout" || outcome === "closed_early";
 	}
 
-	private canReplay(): boolean {
+	private canReplay(session: VoiceSession): boolean {
 		return (
-			!this.replayed &&
-			this.hadAudioSignal &&
-			this.streamWasConnected &&
-			this.audio.byteLength > 0 &&
-			!this.audio.truncated
+			!session.replayed &&
+			session.hadAudioSignal &&
+			session.streamWasConnected &&
+			session.audio.byteLength > 0 &&
+			!session.audio.truncated
 		);
 	}
 
-	private finishSession(): void {
-		this.stream?.close();
-		this.stream = undefined;
-		this.audio.clear();
-		this.setState(this.failureTimes.length >= this.timings.breakerThreshold ? "paused" : "idle");
+	/** Store a recording's result (possibly empty) and emit everything now in order. */
+	private store(session: VoiceSession, text: string): void {
+		if (session.stored) return;
+		session.stored = true;
+		session.abandoned = true;
+		this.clearTimer(session, "reap");
+		const index = this.jobs.indexOf(session);
+		if (index >= 0) this.jobs.splice(index, 1);
+		this.finished.set(session.seq, text);
+		session.audio.clear();
+		this.emitReady();
+		// The last recording has been emitted: the runtime uses this to submit once
+		// per drained queue. Never during shutdown, which is not a "drain".
+		if (!this.disposed && this.queueDepth === 0) this.deps.hooks?.onQueueDrained?.();
+		this.refreshState();
 	}
 
-	private endSession(): void {
-		this.clearSessionTimers();
-		this.captureSession?.stop();
-		this.captureSession = undefined;
-		try {
-			this.stream?.close();
-		} catch {
-			// ignore
+	/** Emit contiguous results in recording-start order; `""` advances without emitting. */
+	private emitReady(): void {
+		while (this.finished.has(this.nextToEmit)) {
+			const text = this.finished.get(this.nextToEmit) ?? "";
+			this.finished.delete(this.nextToEmit);
+			if (text) this.deps.hooks?.onFinal?.(text, this.nextToEmit);
+			this.nextToEmit++;
 		}
-		this.stream = undefined;
-		this.audio.clear();
-		this.coalescer.flush();
 	}
 
-	private resetSession(): void {
-		this.transcript = "";
-		this.pendingInterim = "";
-		this.correctionTerms = [];
-		this.hadAudioSignal = false;
-		this.sawTranscript = false;
-		this.streamWasConnected = false;
-		this.retried = false;
-		this.replayed = false;
-		this.levels.clear();
-		this.audio.clear();
-		this.coalescer.flush();
+	/** Correct and trim a recording's transcript, ready to store. */
+	private finalText(session: VoiceSession): string {
+		let text = session.transcript.trim();
+		if (!text) return "";
+		if (this.deps.backend.capabilities.biasing === "none" && this.deps.correction !== "off") {
+			const result = correctTranscript(text, session.correctionTerms, this.deps.correction);
+			for (const change of result.changes) {
+				this.debug(`correction: ${change.from} -> ${change.to}`);
+			}
+			text = result.text;
+		}
+		if (session.sawTranscript) this.clearFailures();
+		return text;
+	}
+
+	private endSession(session: VoiceSession): void {
+		session.abandoned = true;
+		session.release();
+		session.audio.clear();
+		session.coalescer.flush();
+		if (this.active === session) this.active = undefined;
 	}
 
 	// --- audio -------------------------------------------------------------
 
-	private onData(chunk: Buffer, generation: number): void {
-		if (generation !== this.generation) return;
-		this.noteConnected();
+	private onData(chunk: Buffer, session: VoiceSession): void {
+		if (session.abandoned) return;
+		this.noteConnected(session);
 
-		const level = levelFromS16le(chunk);
-		if (level > AUDIO_SIGNAL_THRESHOLD) this.hadAudioSignal = true;
-		this.levels.push(level);
-		this.deps.hooks?.onLevel?.(this.levels.snapshot());
+		const stream = session.stream;
+		if (!stream) {
+			// Audio that arrives before the backend is ready is retained whole (for
+			// the later flush/replay) rather than coalesced, so it is not sent
+			// twice when the stream finally opens.
+			session.record(chunk);
+			this.deps.hooks?.onLevel?.(session.levels.snapshot());
+			return;
+		}
 
-		this.audio.append(chunk);
-
-		const stream = this.stream;
-		if (!stream) return;
-		for (const frame of this.coalescer.push(chunk)) this.feed(stream, frame);
+		const frames = session.pushChunk(chunk);
+		this.deps.hooks?.onLevel?.(session.levels.snapshot());
+		for (const frame of frames) this.feed(stream, frame);
 	}
 
-	private flushUnsentAudio(generation: number): void {
-		const stream = this.stream;
-		if (!stream || generation !== this.generation) return;
-		const unsent = this.audio.unsent();
+	private flushUnsentAudio(session: VoiceSession): void {
+		const stream = session.stream;
+		if (!stream || session.abandoned) return;
+		const unsent = session.audio.unsent();
 		if (!unsent) return;
 		// Everything captured before the backend was ready is already complete
 		// audio, not a frame in progress, so send it now rather than holding it
 		// for the next live chunk to top up the coalescer.
-		this.feedBuffer(stream, unsent);
-		this.audio.markAllSent();
+		this.feedBuffer(session, stream, unsent);
+		session.audio.markAllSent();
 	}
 
-	private flushTail(generation: number): void {
-		const stream = this.stream;
-		if (!stream || generation !== this.generation) return;
-		const tail = this.coalescer.flush();
+	private flushTail(session: VoiceSession): void {
+		const stream = session.stream;
+		if (!stream || session.abandoned) return;
+		const tail = session.flushTail();
 		if (tail) this.feed(stream, tail);
 	}
 
-	private feedBuffer(stream: VoiceStream, buffer: Buffer): void {
-		for (const frame of this.coalescer.push(buffer)) this.feed(stream, frame);
+	private feedBuffer(session: VoiceSession, stream: VoiceStream, buffer: Buffer): void {
 		// A whole-buffer send (replay, retry) is a complete body of audio, not a
-		// live stream mid-utterance, so do not leave a partial frame waiting for
-		// audio that may never come.
-		const tail = this.coalescer.flush();
-		if (tail) this.feed(stream, tail);
+		// live stream mid-utterance, so `pushBuffer` flushes the partial tail too.
+		for (const frame of session.pushBuffer(buffer)) this.feed(stream, frame);
 	}
 
 	private feedPending = 0;
@@ -458,76 +633,88 @@ export class VoiceController {
 		}
 	}
 
-	private onCaptureEnded(generation: number): void {
-		if (generation !== this.generation) return;
-		if (this.state !== "recording") return;
-		if (!this.hadAudioSignal) this.recordFailure();
+	private onCaptureEnded(session: VoiceSession): void {
+		if (session.abandoned || session.phase !== "recording") return;
+		if (!session.hadAudioSignal) this.recordFailure();
 		this.debug("capture ended on its own");
-		this.finish();
+		this.finish(session);
 	}
 
 	// --- backend events ----------------------------------------------------
 
-	private onEvent(event: VoiceEvent, generation: number): void {
-		if (generation !== this.generation) return;
+	private onEvent(event: VoiceEvent, session: VoiceSession): void {
+		if (session.abandoned) return;
 		// Any transcript means the socket was genuinely connected; the replay path
 		// needs to know that even after the connection later drops.
-		if (event.type === "interim" || event.type === "final") this.streamWasConnected = true;
+		if (event.type === "interim" || event.type === "final") session.streamWasConnected = true;
 
 		switch (event.type) {
 			case "interim": {
-				if (this.state !== "recording" && this.state !== "arming") return;
-				this.pendingInterim = event.text;
-				this.deps.hooks?.onInterim?.(this.composeInterim(event.text));
-				this.armSilenceTimer();
+				if (session.phase !== "recording" && session.phase !== "arming") return;
+				session.pendingInterim = event.text;
+				if (this.interimVisible(session)) {
+					this.deps.hooks?.onInterim?.(this.composeInterim(session, event.text), session.seq);
+				}
+				this.armSilenceTimer(session);
 				return;
 			}
 			case "final": {
 				const text = event.text.trim();
-				this.pendingInterim = "";
+				session.pendingInterim = "";
 				if (!text) return;
-				this.sawTranscript = true;
-				this.transcript = this.transcript ? `${this.transcript} ${text}` : text;
-				this.deps.hooks?.onInterim?.(this.transcript);
-				this.armSilenceTimer();
+				session.sawTranscript = true;
+				session.transcript = session.transcript ? `${session.transcript} ${text}` : text;
+				if (this.interimVisible(session)) {
+					this.deps.hooks?.onInterim?.(session.transcript, session.seq);
+				}
+				this.armSilenceTimer(session);
 				return;
 			}
 			case "error": {
-				this.onStreamError(event, generation);
+				this.onStreamError(event, session);
 				return;
 			}
 		}
 	}
 
+	/**
+	 * Interim text is only shown for the live recording and only when nothing
+	 * else is still transcribing: a queue of older text must not be overwritten
+	 * by a newer recording's tentative words.
+	 */
+	private interimVisible(session: VoiceSession): boolean {
+		return this.queueDepth === 0 && this.active === session;
+	}
+
 	/** Interim text is rendered after whatever has already been committed. */
-	private composeInterim(text: string): string {
-		return this.transcript ? `${this.transcript} ${text}` : text;
+	private composeInterim(session: VoiceSession, text: string): string {
+		return session.transcript ? `${session.transcript} ${text}` : text;
 	}
 
 	/**
 	 * Commit an interim that never got a final, because the connection ended
 	 * before the server confirmed the utterance.
 	 */
-	private promoteInterim(): void {
-		const text = this.pendingInterim.trim();
-		this.pendingInterim = "";
+	private promoteInterim(session: VoiceSession): void {
+		const text = session.pendingInterim.trim();
+		session.pendingInterim = "";
 		if (!text) return;
 		this.debug("promoting unreported interim to final");
-		this.transcript = this.transcript ? `${this.transcript} ${text}` : text;
+		session.transcript = session.transcript ? `${session.transcript} ${text}` : text;
 	}
 
-	private onStreamError(event: { message: string; fatal?: boolean; code?: string }, generation: number): void {
+	private onStreamError(event: { message: string; fatal?: boolean; code?: string }, session: VoiceSession): void {
 		this.debug(`stream error: ${event.message}`);
-		if (this.state !== "recording") return;
+		if (session.abandoned || session.phase !== "recording") return;
 
 		// An error before the first transcript is worth one silent retry, because
 		// it is usually a transient connect or upgrade failure.
-		if (!this.sawTranscript && !this.retried) {
-			this.retried = true;
+		if (!session.sawTranscript && !session.retried) {
+			session.retried = true;
 			this.debug("early stream error; retrying once");
-			this.arm("retry", this.timings.earlyRetryDelayMs, () => {
-				if (generation !== this.generation || this.state !== "recording") return;
-				void this.retryStream(generation);
+			this.arm(session, "retry", this.timings.earlyRetryDelayMs, () => {
+				if (session.abandoned || session.phase !== "recording") return;
+				void this.retryStream(session);
 			});
 			return;
 		}
@@ -535,71 +722,56 @@ export class VoiceController {
 		this.recordFailure();
 		// Whatever was already transcribed is real speech. Salvage it rather than
 		// throwing away a whole utterance because the socket died at the end.
-		this.promoteInterim();
-		if (this.transcript.trim()) {
+		this.promoteInterim(session);
+		if (session.transcript.trim()) {
 			this.debug("salvaging partial transcript before reporting the error");
-			this.emitTranscript();
+			this.store(session, this.finalText(session));
 		}
-		this.fail(event.message, event.code ?? "stream_error");
+		this.fail(session, event.message, event.code ?? "stream_error");
 	}
 
-	private async retryStream(generation: number): Promise<void> {
+	private async retryStream(session: VoiceSession): Promise<void> {
 		try {
-			this.stream?.close();
+			session.stream?.close();
 		} catch {
 			// ignore
 		}
-		this.stream = undefined;
-		const stream = await this.openStream(generation);
-		if (generation !== this.generation) return;
+		session.stream = undefined;
+		const stream = await this.openStream(session);
+		if (session.abandoned) return;
 		if (!stream) {
-			this.fail("Could not reconnect to the voice service.", "connect_failed", { recordFailure: true });
+			this.fail(session, "Could not reconnect to the voice service.", "connect_failed", { recordFailure: true });
 			return;
 		}
 		// A fresh stream has received nothing, so it needs the whole session. The
 		// coalescer may still hold an un-flushed tail that `audio.all()` already
 		// includes, so drop it first rather than sending that tail twice, out of order.
-		this.coalescer.flush();
-		const audio = this.audio.all();
-		if (audio) this.feedBuffer(stream, audio);
-		this.audio.markAllSent();
+		session.coalescer.flush();
+		const audio = session.audio.all();
+		if (audio) this.feedBuffer(session, stream, audio);
+		session.audio.markAllSent();
 	}
 
 	// --- output ------------------------------------------------------------
-
-	private emitTranscript(): void {
-		let text = this.transcript.trim();
-		if (!text) return;
-
-		if (this.deps.backend.capabilities.biasing === "none" && this.deps.correction !== "off") {
-			const result = correctTranscript(text, this.correctionTerms, this.deps.correction);
-			for (const change of result.changes) {
-				this.debug(`correction: ${change.from} -> ${change.to}`);
-			}
-			text = result.text;
-		}
-
-		if (this.sawTranscript) this.clearFailures();
-		this.deps.hooks?.onFinal?.(text);
-	}
 
 	/**
 	 * Nothing was transcribed. Say why, specifically: "no audio" and "no
 	 * network" and "you said nothing" need different fixes.
 	 */
-	private async reportEmpty(): Promise<void> {
-		if (this.transcript.trim().length > 0) return;
-		if (this.clock.now() - this.sessionStartedAt < 2000) return;
+	private async reportEmpty(session: VoiceSession): Promise<void> {
+		if (session.abandoned || session.transcript.trim().length > 0) return;
+		if (this.clock.now() - session.startedAt < 2000) return;
 
-		if (!this.hadAudioSignal) {
+		if (!session.hadAudioSignal) {
 			this.deps.hooks?.onError?.(
 				"No audio detected from the microphone. Check that the right input device is selected and that pi has microphone access.",
 				"no_audio_signal",
 			);
 			return;
 		}
-		if (!this.streamWasConnected) {
+		if (!session.streamWasConnected) {
 			const why = await this.explainConnectionFailure();
+			if (session.abandoned || this.disposed) return;
 			this.deps.hooks?.onError?.(
 				`Voice connection failed.${why ? ` ${why}.` : " Check your network and try again."}`,
 				"connection_failed",
@@ -628,14 +800,14 @@ export class VoiceController {
 
 	// --- failures and breaker ---------------------------------------------
 
-	private fail(message: string, code: string, options: { recordFailure?: boolean } = {}): void {
+	private fail(session: VoiceSession, message: string, code: string, options: { recordFailure?: boolean } = {}): void {
 		if (options.recordFailure) this.recordFailure();
-		// Invalidate in-flight async work with this generation, now that the
-		// session is over.
-		this.generation++;
-		this.endSession();
+		this.endSession(session);
+		// A failed recording still consumed its seq; store "" so later recordings
+		// can still be emitted in recording order.
+		this.store(session, "");
 		this.deps.hooks?.onError?.(message, code);
-		this.setState(this.failureTimes.length >= this.timings.breakerThreshold ? "paused" : "idle");
+		this.refreshState();
 	}
 
 	private recordFailure(hint?: string): void {
@@ -658,50 +830,60 @@ export class VoiceController {
 		return this.failureHint;
 	}
 
+	// --- derived state -----------------------------------------------------
+
+	private deriveState(): VoiceState {
+		if (this.active) return this.active.phase;
+		if (this.failureTimes.length >= this.timings.breakerThreshold) return "paused";
+		const depth = this.queueDepth;
+		if (depth === 0) return "idle";
+		if (depth === 1) return "processing";
+		return "queued";
+	}
+
+	private refreshState(): void {
+		const next = this.deriveState();
+		if (this.state === next) return;
+		this.state = next;
+		this.deps.hooks?.onState?.(next);
+	}
+
 	// --- timers ------------------------------------------------------------
 
-	private armSilenceTimer(): void {
+	private armSilenceTimer(session: VoiceSession): void {
 		if (this.deps.mode !== "tap") return;
-		this.arm("silence", this.timings.tapSilenceMs, () => {
-			if (this.state === "recording") this.finish();
+		this.arm(session, "silence", this.timings.tapSilenceMs, () => {
+			if (session.phase === "recording") this.finish(session);
 		});
 	}
 
-	private armRelease(): void {
-		this.arm("release", this.timings.releaseDebounceMs, () => {
-			if (this.state === "recording") this.finish();
+	private armRelease(session: VoiceSession | undefined): void {
+		if (!session) return;
+		this.arm(session, "release", this.timings.releaseDebounceMs, () => {
+			if (session.phase === "recording") this.finish(session);
 		});
 	}
 
 	/** Auto-repeat observed: cancel the fallback and re-arm the release debounce. */
-	private onHoldProgress(): void {
-		this.clearTimer("fallback");
-		this.armRelease();
+	private onHoldProgress(session: VoiceSession | undefined): void {
+		if (!session) return;
+		this.clearTimer(session, "fallback");
+		this.armRelease(session);
 	}
 
-	private arm(name: TimerName, ms: number, callback: () => void): void {
-		this.clearTimer(name);
-		this.timers[name] = this.clock.setTimeout(() => {
-			this.timers[name] = undefined;
+	private arm(session: VoiceSession, name: SessionTimer, ms: number, callback: () => void): void {
+		this.clearTimer(session, name);
+		session.timers[name] = this.clock.setTimeout(() => {
+			session.timers[name] = undefined;
 			callback();
 		}, ms);
 	}
 
-	private clearTimer(name: TimerName): void {
-		const handle = this.timers[name];
+	private clearTimer(session: VoiceSession, name: SessionTimer): void {
+		const handle = session.timers[name];
 		if (!handle) return;
 		this.clock.clearTimeout(handle);
-		this.timers[name] = undefined;
-	}
-
-	private clearSessionTimers(): void {
-		for (const name of ["retry", "fallback", "release", "silence", "max"] as const) this.clearTimer(name);
-	}
-
-	private setState(state: VoiceState): void {
-		if (this.state === state) return;
-		this.state = state;
-		this.deps.hooks?.onState?.(state);
+		session.timers[name] = undefined;
 	}
 
 	private debug(message: string): void {

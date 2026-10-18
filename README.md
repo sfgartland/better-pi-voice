@@ -87,6 +87,10 @@ pi install /path/to/better-pi-voice        # from a local checkout
 pi install npm:@sfgartland/better-pi-voice      # once published
 ```
 
+The npm package is gallery-discoverable: it carries the `pi-package` keyword and
+declares its extension, so `pi install npm:@sfgartland/better-pi-voice` also works from
+the pi package gallery.
+
 Then add a Deepgram key. The easiest way is `/voice key`:
 
 - `/voice key <path-to-dotenv>` — use a key from an existing dotenv file (it checks one is
@@ -252,8 +256,8 @@ There is **no streaming model lighter than parakeet-0.6b**. The genuinely small 
 `medasr` (128 MB), `parakeet-tdt_ctc-110m` (135 MB), `canary-180m-flash` (218 MB),
 `SenseVoiceSmall` (253 MB), `whisper-small` (270 MB) — are all batch-only, so using one
 means giving up live text and transcribing after you release the key. With batch running
-at 3.5× real-time that is a reasonable trade, and the pipeline already retains the whole
-utterance, but it is not implemented yet.
+at 3.5× real-time that is a reasonable trade, and the pipeline retains the whole
+utterance, chunk-transcribes it while you speak, and finishes the tail when you release.
 
 For non-English dictation, `nemotron-3.5-asr-streaming-0.6b` is the only streaming option
 that is not parakeet, at the same size.
@@ -267,7 +271,7 @@ option for the small models, none of which can stream.
 In batch mode the audio is transcribed in pieces while you are still speaking, so only
 the tail is left when you release the key:
 
-- `parakeet.chunkSeconds` (default 30) is a **target, not a limit**, and only its lower
+- `parakeet.chunkSeconds` (default 15) is a **target, not a limit**, and only its lower
   70% matters: the audio is cut at the **first real pause** at or after that point and
   transcribed in the background. A pause arriving later than the target still triggers a
   cut, and unbroken speech simply grows a longer chunk
@@ -295,21 +299,36 @@ returns an **empty transcript** for any clip that begins mid-sentence, so a chun
 merely the *quietest* moment silently discarded everything in it. Requiring real silence
 costs tail latency on unbroken speech instead of costing speech.
 
+### Recording queue
+
+Recordings never block each other. Press the shortcut again while an earlier recording
+is still being transcribed and a new one starts immediately; results are always emitted
+in the order the recordings *started*, even when a later one finishes first.
+
+- one capture at a time; each recording carries a sequence number and its own audio
+- at most **4** recordings may be waiting, and at most **8 MiB** of buffered audio. When
+  either is reached the new press is **refused with a notification** rather than
+  silently dropped
+- a job that never settles is abandoned after `jobReapMs` (default 30 s) so the queue
+  always advances; a recording that produced nothing stores `""` and is skipped, which
+  keeps the order intact
+- the status line shows the depth (`1 recording`, `3 recordings`), so a backlog is
+  visible without opening anything
+- with `submitOnStop`, a drained queue is submitted **once**, not once per recording
+
 ### Keeping the model loaded
 
-The model is **released after every recording by default**, because a warm reload is only
-about 0.4 s and holding ~700 MB between recordings is not a good trade on a laptop. Set
-`parakeet.idleUnloadMs` to keep it resident instead — useful for larger models, where a
-reload costs real time. When residency is on, the model is released by whichever of these
-happens first:
+The model is **held for a minute after the last recording by default**
+(`parakeet.idleUnloadMs` is `60000`). Queued recordings arrive in bursts, and a warm
+reload of a 135 MB–700 MB GGUF is felt between each one, so keeping it resident across a
+burst is the better trade. Residency is released by whichever of these happens first:
 
-- the idle window expires (`parakeet.idleUnloadMs`)
+- the idle window expires (`parakeet.idleUnloadMs`; set it to `0` to release as soon as
+  the queue empties)
 - the machine gets busy — one-minute load average per CPU reaching **0.8**
   (`parakeet.loadShedRatio`), checked once a minute
 
 A new recording cancels a pending release, and session shutdown releases immediately.
-Note that the load-shedding half only matters while residency is on: at the default of 0
-the memory is already back after each recording, so there is nothing to shed.
 
 ## Settings
 
@@ -334,9 +353,9 @@ malformed falls back to a default and warns rather than breaking the microphone.
   "parakeet": {
     "modelPath": null,                // null = read pi-voice's config if present
     "mode": "batch",                  // "batch" (faster, chunked) | "streaming"
-    "chunkSeconds": 30,               // cut at a pause near this length; 0 = only at the end
+    "chunkSeconds": 15,               // cut at a pause near this length; 0 = only at the end
     "silenceLevel": "auto",           // "auto" derives the pause threshold per recording; a number pins it
-    "idleUnloadMs": 0,                // 0 = release after each recording (see above)
+    "idleUnloadMs": 60000,            // hold the model this long after the queue empties; 0 = release at once
     "loadShedRatio": 0.8              // with residency on, release early once load per CPU reaches this
   },
   "keyterms": {

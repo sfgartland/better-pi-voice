@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { type ControllerDeps, type ControllerTimings, VoiceController, type VoiceState } from "./controller.ts";
+import { deferred } from "./testing/deferred.ts";
 import { FakeBackend } from "./testing/fake-backend.ts";
 import { FakeCapture, pcmOf } from "./testing/fake-capture.ts";
 import { FakeClock } from "./testing/fake-clock.ts";
@@ -12,6 +13,8 @@ type Harness = {
 	interims: string[];
 	finals: string[];
 	errors: Array<{ message: string; code: string }>;
+	notices: string[];
+	drained: number;
 	states: VoiceState[];
 	levels: number[][];
 	debug: string[];
@@ -29,9 +32,11 @@ function makeHarness(overrides: Partial<ControllerDeps> = {}, timings: Partial<C
 	const interims: string[] = [];
 	const finals: string[] = [];
 	const errors: Array<{ message: string; code: string }> = [];
+	const notices: string[] = [];
 	const states: VoiceState[] = [];
 	const levels: number[][] = [];
 	const debug: string[] = [];
+	let drained = 0;
 
 	const controller = new VoiceController({
 		backend,
@@ -46,6 +51,10 @@ function makeHarness(overrides: Partial<ControllerDeps> = {}, timings: Partial<C
 			onInterim: (text) => interims.push(text),
 			onFinal: (text) => finals.push(text),
 			onError: (message, code) => errors.push({ message, code }),
+			onNotice: (message) => notices.push(message),
+			onQueueDrained: () => {
+				drained++;
+			},
 			onState: (state) => states.push(state),
 			onLevel: (snapshot) => levels.push(snapshot),
 			onDebug: (message) => debug.push(message),
@@ -53,7 +62,22 @@ function makeHarness(overrides: Partial<ControllerDeps> = {}, timings: Partial<C
 		...overrides,
 	});
 
-	return { controller, backend, capture, clock, interims, finals, errors, states, levels, debug };
+	return {
+		controller,
+		backend,
+		capture,
+		clock,
+		interims,
+		finals,
+		errors,
+		notices,
+		states,
+		levels,
+		debug,
+		get drained() {
+			return drained;
+		},
+	};
 }
 
 /** Start a session and let it reach "recording". */
@@ -712,5 +736,305 @@ describe("audio plumbing", () => {
 		await flush();
 
 		expect(h.controller.currentState).toBe("recording");
+	});
+});
+
+describe("queue", () => {
+	test("a press while processing starts a second recording instead of dropping it", async () => {
+		const h = makeHarness();
+		const gate = deferred<void>();
+		h.backend.plans = [{ finalizeGate: gate.promise, finalOnFinalize: "first" }, { finalOnFinalize: "second" }];
+
+		await start(h); // recording, seq 0
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+		expect(h.controller.currentState).toBe("processing");
+
+		h.controller.press(); // must open a second capture, not be swallowed
+		await flush();
+		expect(h.capture.startCount).toBe(2);
+		expect(h.controller.currentState).toBe("recording");
+
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+		expect(h.controller.currentState).toBe("queued");
+		expect(h.controller.queueDepth).toBe(2);
+		expect(h.finals).toEqual([]); // seq 1 is done but may not overtake seq 0
+
+		gate.resolve();
+		await flush();
+		expect(h.finals).toEqual(["first", "second"]);
+		expect(h.controller.currentState).toBe("idle");
+	});
+
+	test("two presses in the same tick open exactly one capture", async () => {
+		const h = makeHarness();
+		await flush();
+		h.controller.press();
+		h.controller.press(); // second press lands while begin() is still awaiting
+		await flush();
+		expect(h.capture.startCount).toBe(1);
+		expect(h.controller.queueDepth).toBe(0);
+		expect(h.controller.currentState).toBe("recording");
+	});
+
+	test("finals are emitted in recording order when they complete out of order", async () => {
+		const h = makeHarness();
+		const first = deferred<void>();
+		const second = deferred<void>();
+		h.backend.plans = [
+			{ finalizeGate: first.promise, finalOnFinalize: "first" },
+			{ finalizeGate: second.promise, finalOnFinalize: "second" },
+		];
+
+		await start(h); // seq 0
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+
+		h.controller.press(); // seq 1, while seq 0 is still finalizing
+		await flush();
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+		expect(h.controller.currentState).toBe("queued");
+
+		second.resolve(); // the later recording finishes first
+		await flush();
+		expect(h.finals).toEqual([]); // but must not be emitted yet
+		expect(h.controller.queueDepth).toBe(2);
+
+		first.resolve();
+		await flush();
+		expect(h.finals).toEqual(["first", "second"]);
+		expect(h.controller.currentState).toBe("idle");
+		expect(h.drained).toBe(1);
+	});
+
+	test("a failed job is stored empty and the next recording still lands", async () => {
+		const h = makeHarness();
+		h.backend.plans = [{ finalizeOutcome: "closed_early" }, { finalOnFinalize: "second" }];
+
+		await start(h);
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+
+		h.controller.press();
+		await flush();
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+
+		expect(h.controller.queueDepth).toBe(0);
+		expect(h.finals).toEqual(["second"]);
+	});
+
+	test("a hung job is reaped and does not stall the queue", async () => {
+		const gate = deferred<void>();
+		const h = makeHarness({}, { jobReapMs: 10_000 });
+		h.backend.plans = [{ finalizeGate: gate.promise }, { finalOnFinalize: "second" }];
+
+		await start(h);
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+		h.controller.press();
+		await flush();
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+		expect(h.finals).toEqual([]);
+
+		h.clock.advance(10_000); // reap fires
+		await flush();
+		expect(h.finals).toEqual(["second"]);
+		expect(h.controller.queueDepth).toBe(0);
+		expect(h.debug.join("\n")).toContain("reap");
+
+		gate.resolve(); // a late settle must not emit twice
+		await flush();
+		expect(h.finals).toEqual(["second"]);
+	});
+
+	test("a job with truncated buffered audio still stores text and frees its slot", async () => {
+		const h = makeHarness({}, { maxBufferedAudioMs: 4_000 });
+		h.backend.plans = [{ finalizeOutcome: "closed_early" }, { finalOnFinalize: "second" }];
+
+		// seq 0: 4.375 s of signal against a 4 s retained buffer, so the replay path
+		// is declined because the buffer is truncated.
+		await start(h);
+		h.capture.emit(pcmOf(900, 140_000));
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+
+		h.controller.press();
+		await flush();
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+		expect(h.controller.queueDepth).toBe(0);
+		expect(h.finals).toEqual(["second"]);
+	});
+
+	test("refuses a new recording when the job cap is reached and says so", async () => {
+		const gate = deferred<void>();
+		const h = makeHarness({}, { maxQueuedJobs: 2 });
+		h.backend.plans = [{ finalizeGate: gate.promise }, { finalizeGate: gate.promise }, { finalOnFinalize: "never" }];
+
+		await start(h);
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+		h.controller.press(); // second recording, allowed
+		await flush();
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+		expect(h.controller.queueDepth).toBe(2);
+
+		h.controller.press(); // third is refused: no new capture
+		await flush();
+		expect(h.capture.startCount).toBe(2);
+		expect(h.controller.currentState).toBe("queued");
+		expect(h.notices).toHaveLength(1);
+		expect(h.notices[0]).toContain("queue is full");
+
+		gate.resolve();
+		await flush();
+	});
+
+	test("refuses a new recording when buffered job audio would exceed the budget", async () => {
+		const gate = deferred<void>();
+		const h = makeHarness({}, { maxQueuedAudioBytes: 1_000 });
+		h.backend.plans = [{ finalizeGate: gate.promise }];
+
+		await start(h);
+		h.capture.emit(pcmOf(900, 4_000)); // 4 KB retained > 1 KB budget
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+
+		h.controller.press();
+		await flush();
+		expect(h.capture.startCount).toBe(1);
+		expect(h.notices[0]).toContain("queue is full");
+
+		gate.resolve();
+		await flush();
+	});
+
+	test("a refused press arms no timers and a later release is ignored", async () => {
+		const gate = deferred<void>();
+		const h = makeHarness({}, { maxQueuedJobs: 1 });
+		h.backend.plans = [{ finalizeGate: gate.promise }];
+		await start(h);
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+
+		h.clock.advance(10_000); // let any stray timers fire while idle
+		const timersBefore = h.clock.pending;
+		h.controller.press(); // refused
+		expect(h.clock.pending).toBe(timersBefore); // no fallback/release timer armed
+		h.controller.release(); // must not finish anything
+		await flush();
+		expect(h.capture.startCount).toBe(1);
+
+		gate.resolve();
+		await flush();
+	});
+});
+
+describe("dispose", () => {
+	test("dispose stops the microphone, keeps finished text, and returns despite a hung job", async () => {
+		const gate = deferred<void>();
+		const h = makeHarness({}, { disposeGraceMs: 5_000 });
+		h.backend.plans = [{ finalizeGate: gate.promise, finalOnFinalize: "first" }, { finalOnFinalize: "second" }];
+
+		await start(h);
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+		h.controller.press(); // second recording open while seq 0 hangs
+		await flush();
+		expect(h.capture.startCount).toBe(2);
+
+		const disposing = h.controller.dispose();
+		h.clock.advance(5_000); // grace expires; the hung job is abandoned
+		await disposing;
+
+		expect(h.controller.currentState).toBe("idle");
+		expect(h.controller.queueDepth).toBe(0);
+		expect(h.capture.stopCount).toBe(2);
+		expect(h.finals).toEqual(["second"]); // completed work is not thrown away
+
+		gate.resolve();
+		await flush();
+		expect(h.finals).toEqual(["second"]);
+	});
+});
+
+describe("sequence-aware output", () => {
+	test("suppresses interims while another recording is still transcribing", async () => {
+		const gate = deferred<void>();
+		const h = makeHarness();
+		h.backend.plans = [
+			{ finalizeGate: gate.promise },
+			{
+				events: [
+					{ type: "interim", text: "live" },
+					{ type: "final", text: "second" },
+				],
+			},
+		];
+
+		await start(h);
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+		h.controller.press(); // job pending + a live recording
+		await flush();
+		expect(h.interims).not.toContain("live");
+
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+		gate.resolve();
+		await flush();
+		expect(h.finals).toEqual(["second"]);
+	});
+
+	test("signals a drained queue exactly once", async () => {
+		const h = makeHarness();
+		await start(h);
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+		expect(h.drained).toBe(1);
+	});
+});
+
+describe("cut on begin", () => {
+	test("starting a new recording cuts the outstanding batch tail", async () => {
+		const gate = deferred<void>();
+		const h = makeHarness();
+		h.backend.plans = [{ finalizeGate: gate.promise }, {}];
+
+		await start(h);
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+		expect(h.backend.streams[0]!.cutCount).toBe(0);
+
+		h.controller.press(); // begin() must cut the previous stream now
+		await flush();
+		expect(h.backend.streams[0]!.cutCount).toBe(1);
+
+		gate.resolve();
+		await flush();
 	});
 });

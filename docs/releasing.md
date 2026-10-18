@@ -46,3 +46,22 @@ version you intend to ship first.
 ## Without GitHub Actions
 
 `npm publish --access public` from a checkout still works; the account's 2FA applies.
+
+## Discoverability and install check
+
+`src/packaging.test.ts` pins the pi-package contract: the `pi-package` keyword, the
+`pi.extensions` manifest (and that the entry exists), host packages in
+`peerDependencies` (never `dependencies`), and the published `files` allowlist. It
+runs as part of `bun run check`.
+
+Before tagging a release, verify the real install path against a throwaway agent
+directory, so a stale global config cannot mask a broken manifest:
+
+```bash
+TMPHOME=$(mktemp -d)
+HOME="$TMPHOME" pi install ./
+HOME="$TMPHOME" pi list          # must list this package
+npm pack --dry-run               # ships index.ts, src/**, README, CHANGELOG, LICENSE
+```
+
+`npm pack --dry-run` must not list `*.test.ts`, `src/testing/`, or `docs/`.
