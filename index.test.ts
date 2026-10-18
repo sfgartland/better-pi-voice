@@ -1,5 +1,5 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFakeCtx, createFakePi, isolateAgentDir } from "./test-support/fake-pi.ts";
@@ -540,7 +540,12 @@ describe("guided setup", () => {
 		const shortcut = [...pi.shortcuts.values()].at(-1)!;
 		await shortcut.handler(ctx as never);
 		// The shortcut handler launches setup without awaiting it.
-		await new Promise((resolve) => setTimeout(resolve, 25));
+		// The shortcut handler launches setup without awaiting it; wait until it
+		// lands rather than racing a fixed delay.
+		const deadline = Date.now() + 2_000;
+		while (!existsSync(settingsPath()) && Date.now() < deadline) {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
 
 		const { settings } = await readSettings();
 		expect(settings.backend).toBe("parakeet");
