@@ -142,9 +142,15 @@ describe("EditorSink", () => {
 });
 
 describe("statusText", () => {
+	test("shows how many recordings are still pending", () => {
+		expect(statusText("processing", "deepgram nova-3", 1)).toContain("1 recording");
+		expect(statusText("queued", "deepgram nova-3", 3)).toContain("3 recordings");
+		expect(statusText("recording", "deepgram nova-3", 2)).toContain("2 queued");
+	});
+
 	test("names the backend and model in every state", () => {
 		const label = "deepgram nova-3";
-		for (const state of ["idle", "arming", "recording", "processing", "paused"] as const) {
+		for (const state of ["idle", "arming", "recording", "processing", "queued", "paused"] as const) {
 			expect(statusText(state, label)).toContain(label);
 		}
 	});

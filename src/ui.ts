@@ -147,16 +147,20 @@ export class EditorSink {
  * obvious which one is listening — that is the first question when dictation
  * comes back wrong.
  */
-export function statusText(state: VoiceState, label: string): string | undefined {
+export function statusText(state: VoiceState, label: string, queueDepth = 0): string | undefined {
+	const pending = queueDepth >= 1 ? `${String(queueDepth)} ${queueDepth === 1 ? "recording" : "recordings"}` : "";
+	const waiting = queueDepth >= 1 ? ` (${pending} waiting)` : "";
 	switch (state) {
 		case "arming":
 			return `\u25cf ${label}: connecting\u2026`;
 		case "recording":
-			return `\u25cf ${label}: listening`;
+			return queueDepth > 1
+				? `\u25cf ${label}: listening (${String(queueDepth)} queued)`
+				: `\u25cf ${label}: listening`;
 		case "processing":
-			return `transcribing with ${label}\u2026`;
+			return `transcribing with ${label}\u2026${waiting}`;
 		case "queued":
-			return `transcribing with ${label}\u2026`;
+			return `transcribing with ${label}\u2026${waiting}`;
 		case "paused":
 			return `${label}: paused after repeated failures`;
 		default:

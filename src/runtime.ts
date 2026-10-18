@@ -150,7 +150,7 @@ export async function createRuntime(
 		keyterms,
 		hooks: {
 			onState: (state) => {
-				ctx.ui.setStatus(STATUS_KEY, statusText(state, label));
+				ctx.ui.setStatus(STATUS_KEY, statusText(state, label, controller.queueDepth));
 				if (state === "recording" || state === "arming") editor.begin();
 				if (state === "idle" || state === "paused") ctx.ui.setWidget(LEVEL_WIDGET_KEY, undefined);
 			},
@@ -173,6 +173,7 @@ export async function createRuntime(
 				logger.debug(`error ${code}: ${message}`);
 				ctx.ui.notify(message, "error");
 			},
+			onNotice: (message, level) => ctx.ui.notify(message, level),
 			onDebug: (message) => logger.debug(message),
 		},
 	});
