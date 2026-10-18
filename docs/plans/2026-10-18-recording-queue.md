@@ -52,6 +52,7 @@ The spec is a vision document; these input classes are implied but not spelled o
 - `src/backends/vad.test.ts`
 - `src/backends/pause-detector.ts` — `PauseDetector`, `LevelPauseDetector`, `VadPauseDetector`.
 - `src/backends/pause-detector.test.ts`
+- `src/packaging.test.ts` — the pi-package discoverability guard (Task 18).
 
 **Modify**
 - `src/controller.ts` / `src/controller.test.ts` — the queue and derived state (the core of this plan).
@@ -64,6 +65,7 @@ The spec is a vision document; these input classes are implied but not spelled o
 - `src/model-download.ts` / `src/model-download.test.ts` — catalog `role` + Silero VAD entry.
 - `src/setup.ts` — skip VAD-role entries in the model picker.
 - `README.md` — resident model, chunk length, queue behavior, stale "not implemented yet" line.
+- `package.json` — only if the Task 18 guard finds a manifest gap.
 
 ---
 
@@ -1231,6 +1233,75 @@ Expected: PASS; no references to the removed claims remain.
 ```bash
 git add src/backends/parakeet.ts README.md
 git commit -m "docs: correct stale batch and biasing notes"
+```
+
+---
+
+### Task 18: pi-package discoverability compliance (guard + verify)
+
+Guidelines: `packages.md` in the pi coding-agent docs (local copy at
+`/home/severingartland/.pi/agent/install/releases/1.3.0/node_modules/@earendil-works/pi-coding-agent/docs/packages.md`).
+A package is gallery-discoverable when it carries the `pi-package` keyword, declares its resources (here
+the `pi.extensions` manifest) and keeps host-provided packages in `peerDependencies`. This task pins that
+contract with a test so a later manifest edit cannot silently drop out of discovery.
+
+**Files:**
+- Create: `src/packaging.test.ts`
+- Modify: `package.json` (only if the guard finds a gap)
+- Modify: `README.md`, `docs/releasing.md` (discoverability/install note)
+
+**Interfaces:** none (manifest + prose only).
+
+- [ ] **Step 1: Write the failing guard** in `src/packaging.test.ts` — read `package.json` from the
+  package root (`new URL("../package.json", import.meta.url)`) and assert:
+
+```ts
+// src/packaging.test.ts
+test("package.json is a discoverable pi package", async () => {
+	const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+	expect(pkg.keywords).toContain("pi-package");
+	expect(Array.isArray(pkg.pi?.extensions) && pkg.pi.extensions.length > 0).toBe(true);
+	for (const entry of pkg.pi.extensions) expect(existsSync(new URL(`../${entry}`, import.meta.url))).toBe(true);
+	// host-provided packages: peerDependencies only, "*" range
+	const host = Object.keys(pkg.peerDependencies ?? {}).filter((n) => n.startsWith("@earendil-works/"));
+	expect(host).toContain("@earendil-works/pi-coding-agent");
+	for (const n of host) expect(pkg.peerDependencies[n]).toBe("*");
+	for (const n of host) expect(pkg.dependencies?.[n]).toBeUndefined();
+	// gallery previews + published file allowlist
+	for (const key of ["image", "video"] as const) expect(String(pkg.pi?.[key])).toMatch(/^https:\/\//);
+	for (const f of ["index.ts", "src/", "README.md"]) expect(pkg.files).toContain(f);
+});
+```
+
+- [ ] **Step 2: Run it to verify it fails or passes**
+
+Run: `bun test src/packaging.test.ts`
+Expected: PASS on the current manifest (the fields already exist) — the test is the guard. If it FAILS,
+fix `package.json` until it passes; do not weaken the assertions.
+
+- [ ] **Step 3: Verify the published tarball**
+
+Run: `npm pack --dry-run`
+Expected: the listing includes `index.ts`, `src/**` (minus `*.test.ts` and `src/testing/`), `README.md`,
+`CHANGELOG.md`, `LICENSE`; no test files, no `docs/`.
+
+- [ ] **Step 4: Verify a real install path**
+
+Run: `pi install ./` in a throwaway `HOME` (or `pi -e ./`), then `pi list`
+Expected: the package loads its extension; no host-provided package resolves from the package's own
+`node_modules`. Record the exact command that worked in `docs/releasing.md`.
+
+- [ ] **Step 5: Add the discoverability line to `README.md`** — name `pi install npm:@sfgartland/better-pi-voice`
+  and the gallery (`pi-package` keyword) so a reader knows how it is found.
+
+- [ ] **Step 6: Verify and commit**
+
+Run: `bun run check`
+Expected: PASS.
+
+```bash
+git add src/packaging.test.ts package.json README.md docs/releasing.md
+git commit -m "test: guard pi-package discoverability and packaging"
 ```
 
 ---
