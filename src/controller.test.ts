@@ -767,4 +767,37 @@ describe("queue", () => {
 		expect(h.controller.queueDepth).toBe(0);
 		expect(h.controller.currentState).toBe("recording");
 	});
+
+	test("finals are emitted in recording order when they complete out of order", async () => {
+		const h = makeHarness();
+		const first = deferred<void>();
+		const second = deferred<void>();
+		h.backend.plans = [
+			{ finalizeGate: first.promise, finalOnFinalize: "first" },
+			{ finalizeGate: second.promise, finalOnFinalize: "second" },
+		];
+
+		await start(h); // seq 0
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+
+		h.controller.press(); // seq 1, while seq 0 is still finalizing
+		await flush();
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+		expect(h.controller.currentState).toBe("queued");
+
+		second.resolve(); // the later recording finishes first
+		await flush();
+		expect(h.finals).toEqual([]); // but must not be emitted yet
+		expect(h.controller.queueDepth).toBe(2);
+
+		first.resolve();
+		await flush();
+		expect(h.finals).toEqual(["first", "second"]);
+		expect(h.controller.currentState).toBe("idle");
+		expect(h.drained).toBe(1);
+	});
 });
