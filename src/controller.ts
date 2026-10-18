@@ -281,6 +281,15 @@ export class VoiceController {
 
 	private async begin(): Promise<void> {
 		if (this.disposed || this.starting) return;
+		// A new recording is starting: any queued batch tail should start decoding
+		// now rather than waiting for more audio that may never come.
+		for (const job of this.jobs) {
+			try {
+				job.stream?.cut?.();
+			} catch {
+				// A closed stream is allowed to refuse.
+			}
+		}
 		this.starting = true;
 		const session = new VoiceSession({
 			seq: this.nextSeq++,

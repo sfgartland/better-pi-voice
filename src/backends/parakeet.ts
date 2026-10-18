@@ -518,6 +518,17 @@ class ParakeetBatchStream implements VoiceStream {
 		);
 	}
 
+	/**
+	 * Transcribe the buffered tail right now, without waiting for the chunk
+	 * target. A new recording calls this so a queued batch tail starts decoding
+	 * immediately instead of after `chunkSeconds` more audio.
+	 */
+	cut(): void {
+		if (this.finalizeStarted) return;
+		const all = this.takeAll();
+		if (all) this.enqueue(all);
+	}
+
 	private notifyReleased(): void {
 		if (this.released) return;
 		this.released = true;

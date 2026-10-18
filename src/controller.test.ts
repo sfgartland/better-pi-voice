@@ -1007,3 +1007,24 @@ describe("sequence-aware output", () => {
 		expect(h.drained).toBe(1);
 	});
 });
+
+describe("cut on begin", () => {
+	test("starting a new recording cuts the outstanding batch tail", async () => {
+		const gate = deferred<void>();
+		const h = makeHarness();
+		h.backend.plans = [{ finalizeGate: gate.promise }, {}];
+
+		await start(h);
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+		expect(h.backend.streams[0]!.cutCount).toBe(0);
+
+		h.controller.press(); // begin() must cut the previous stream now
+		await flush();
+		expect(h.backend.streams[0]!.cutCount).toBe(1);
+
+		gate.resolve();
+		await flush();
+	});
+});

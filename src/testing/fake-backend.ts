@@ -22,6 +22,7 @@ export class FakeStream implements VoiceStream {
 	readonly keytermUpdates: string[][] = [];
 	feedCount = 0;
 	finalizeCount = 0;
+	cutCount = 0;
 	closed = false;
 
 	constructor(
@@ -53,6 +54,10 @@ export class FakeStream implements VoiceStream {
 
 	close(): void {
 		this.closed = true;
+	}
+
+	cut(): void {
+		this.cutCount++;
 	}
 
 	isConnected(): boolean {

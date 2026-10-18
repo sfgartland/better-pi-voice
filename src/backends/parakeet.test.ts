@@ -425,6 +425,18 @@ describe("batch mode", () => {
 		expect(h.recorder.calls[0]).toBe(41 * HUNDRED_MS);
 	});
 
+	test("cut() transcribes the buffered tail immediately", async () => {
+		const h = makeBatchBackend({ chunkSeconds: 15 });
+		const stream = await startStream(h);
+
+		// One second buffered, well under the 15 s target: only a cut flushes it.
+		for (let i = 0; i < 10; i++) stream.feed(loud);
+		stream.cut?.();
+		await settle();
+
+		expect(h.recorder.calls).toEqual([10 * HUNDRED_MS]);
+	});
+
 	test("close releases the model, so residency can start its timer", async () => {
 		const clock = new FakeClock();
 		const recorder = recordingModel();
