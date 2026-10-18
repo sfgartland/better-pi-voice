@@ -950,6 +950,69 @@ describe("queue", () => {
 });
 
 describe("dispose", () => {
+	test("dispose during arming resolves, keeps earlier text, and leaves the state idle", async () => {
+		const h = makeHarness();
+		h.backend.plans = [{ finalOnFinalize: "first" }];
+
+		// One complete recording first, so there is already-emitted text to keep.
+		await start(h);
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+		expect(h.finals).toEqual(["first"]);
+
+		// The second session gets as far as "arming" and then the microphone
+		// stays held open, so shutdown has to abandon a session that never
+		// reached "recording".
+		const gate = deferred<void>();
+		h.capture.startGate = gate.promise;
+		h.controller.press();
+		await flush();
+		expect(h.controller.currentState).toBe("arming");
+		expect(h.capture.startCount).toBe(2);
+
+		const disposing = h.controller.dispose();
+		await expect(disposing).resolves.toBeUndefined();
+		// The runtime only reaches the backend cleanup if the controller's own
+		// shutdown resolved.
+		await h.backend.dispose?.();
+		expect(h.backend.disposeCount).toBe(1);
+
+		expect(h.controller.currentState).toBe("idle");
+		expect(h.states).not.toContain("paused");
+		expect(h.controller.queueDepth).toBe(0);
+		expect(h.finals).toEqual(["first"]);
+
+		gate.resolve();
+		await flush();
+		// The abandoned session stays gone once its microphone finally starts.
+		expect(h.controller.currentState).toBe("idle");
+		expect(h.states).not.toContain("paused");
+		expect(h.finals).toEqual(["first"]);
+	});
+
+	test("closes a stream that arrives after its session was abandoned", async () => {
+		const gate = deferred<void>();
+		const h = makeHarness();
+		h.backend.startGate = gate.promise;
+
+		h.controller.press();
+		await flush(); // recording, but `backend.start()` is still in flight
+		expect(h.backend.startCount).toBe(1);
+		expect(h.backend.streams).toHaveLength(0);
+
+		await h.controller.dispose();
+		expect(h.controller.currentState).toBe("idle");
+
+		gate.resolve();
+		await flush();
+
+		// The stream the backend handed to an abandoned session must be released,
+		// or its session count never reaches zero and the model cannot be freed.
+		expect(h.backend.streams).toHaveLength(1);
+		expect(h.backend.streams[0]!.closed).toBe(true);
+	});
+
 	test("dispose stops the microphone, keeps finished text, and returns despite a hung job", async () => {
 		const gate = deferred<void>();
 		const h = makeHarness({}, { disposeGraceMs: 5_000 });

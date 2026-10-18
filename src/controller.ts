@@ -245,11 +245,13 @@ export class VoiceController {
 		this.disposed = true;
 		const active = this.active;
 		if (active && active.phase === "recording") this.finish(active);
-		if (this.active) {
+		const arming = this.active;
+		if (arming) {
 			// Still arming: no recording to finalize, so abandon it and resolve its
-			// seq immediately.
-			this.endSession(this.active);
-			this.store(this.active, "");
+			// seq immediately. `endSession` clears `this.active`, so the reference
+			// has to be held across it.
+			this.endSession(arming);
+			this.store(arming, "");
 		}
 
 		if (this.inflight.size > 0) {
@@ -329,7 +331,13 @@ export class VoiceController {
 			this.armSilenceTimer(session);
 
 			const stream = await this.openStream(session);
-			if (session.abandoned) return;
+			if (session.abandoned) {
+				// Shutdown or cancellation raced the connect. Nobody owns this stream
+				// now, so release it rather than leaving the backend's session count
+				// above zero forever (which keeps the model resident).
+				this.discardStream(stream);
+				return;
+			}
 			if (!stream) {
 				// Ask the backend why, so a local setup says "no model" rather than
 				// "could not connect".
@@ -367,6 +375,16 @@ export class VoiceController {
 		// Never clear a flag set by an earlier connection in this session.
 		session.streamWasConnected ||= stream.isConnected();
 		return stream;
+	}
+
+	/** Release a stream no session owns any more, so the backend can free its model. */
+	private discardStream(stream: VoiceStream | undefined): void {
+		if (!stream) return;
+		try {
+			stream.close();
+		} catch {
+			// A stream that never opened is allowed to refuse.
+		}
 	}
 
 	private finish(session: VoiceSession | undefined): void {
@@ -478,7 +496,10 @@ export class VoiceController {
 		session.stream = undefined;
 
 		const stream = await this.openStream(session);
-		if (session.abandoned || !stream) return false;
+		if (session.abandoned || !stream) {
+			this.discardStream(stream);
+			return false;
+		}
 
 		session.transcript = "";
 		session.pendingInterim = "";
@@ -738,7 +759,10 @@ export class VoiceController {
 		}
 		session.stream = undefined;
 		const stream = await this.openStream(session);
-		if (session.abandoned) return;
+		if (session.abandoned) {
+			this.discardStream(stream);
+			return;
+		}
 		if (!stream) {
 			this.fail(session, "Could not reconnect to the voice service.", "connect_failed", { recordFailure: true });
 			return;

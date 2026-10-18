@@ -85,6 +85,10 @@ export class FakeBackend implements VoiceBackend {
 	failToConnect = 0;
 	/** Simulate a backend that takes a while to become ready (model load, connect). */
 	startDelayMs = 0;
+	/** Hold `start()` open until this resolves, so shutdown can race the connect. */
+	startGate: Promise<void> | undefined;
+	/** How often the runtime's shutdown cleanup reached the backend. */
+	disposeCount = 0;
 
 	get last(): FakeStream | undefined {
 		return this.streams.at(-1);
@@ -101,6 +105,7 @@ export class FakeBackend implements VoiceBackend {
 		this.startCount++;
 		this.lastOptions = options;
 		if (this.startDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.startDelayMs));
+		if (this.startGate) await this.startGate;
 		if (this.failToConnect > 0) {
 			this.failToConnect--;
 			return undefined;
@@ -110,5 +115,9 @@ export class FakeBackend implements VoiceBackend {
 		this.streams.push(stream);
 		for (const event of plan.events ?? []) emit(event);
 		return stream;
+	}
+
+	async dispose(): Promise<void> {
+		this.disposeCount++;
 	}
 }
