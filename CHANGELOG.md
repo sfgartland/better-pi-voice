@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-18
+
+### Fixed
+
+- **`dispose()` could throw while a recording was still starting (arming).** `endSession`
+  cleared the active session before it was stored, so the shutdown drain aborted: finished
+  text could be lost and the backend was never freed. The active session is now captured
+  before it is ended.
+- **A stream opened while a recording was cancelled leaked.** If the session was abandoned
+  during `backend.start()`, the stream (and, for the local backend, the session refcount)
+  was never released, so the model could never unload again. Abandoned streams are now
+  closed, including on the replay and retry paths.
+- **The local model could be unloaded under a session that was still starting.** Parakeet
+  now pins the model for the whole `start()` window and releases it on every early return
+  or throw.
+
 ## [0.2.0] - 2026-10-18
 
 ### Added
