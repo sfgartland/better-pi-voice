@@ -262,7 +262,7 @@ describe("/voice set", () => {
 
 		await pi.run("voice", "set chunkSeconds soon", ctx);
 
-		expect((await readSettings()).settings.parakeet.chunkSeconds).toBe(30);
+		expect((await readSettings()).settings.parakeet.chunkSeconds).toBe(15);
 		expect(notifications.length).toBe(1);
 		expect(reloads()).toBe(0);
 	});
@@ -285,7 +285,7 @@ describe("/voice set", () => {
 
 		expect(notifications[0]!.message).toContain("Unknown setting");
 		expect((await readSettings()).settings.backend).toBe("deepgram");
-		expect((await readSettings()).settings.parakeet.chunkSeconds).toBe(30);
+		expect((await readSettings()).settings.parakeet.chunkSeconds).toBe(15);
 		expect(reloads()).toBe(0);
 	});
 
