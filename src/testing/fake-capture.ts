@@ -5,6 +5,11 @@ export class FakeCapture implements Capture {
 	availability: { available: boolean; reason?: string } = { available: true };
 	/** Override the result of the next `start()`. */
 	startResult: CaptureStartResult | undefined;
+	/**
+	 * Hold `start()` open until this resolves, so a session can be caught with
+	 * its microphone still coming up.
+	 */
+	startGate: Promise<void> | undefined;
 	startCount = 0;
 	stopCount = 0;
 
@@ -19,6 +24,7 @@ export class FakeCapture implements Capture {
 		this.startCount++;
 		this.onData = onData;
 		this.onEnd = onEnd;
+		if (this.startGate) await this.startGate;
 		if (this.startResult) return this.startResult;
 		return { ok: true, session: { stop: () => this.stopCount++ } };
 	}

@@ -698,6 +698,35 @@ describe("session refcounting", () => {
 		expect(disposed()).toBe(1);
 	});
 
+	test("a dispose that races a starting session does not free the model", async () => {
+		const { backend, disposed } = makeRefBackend({}, { idleUnloadMs: 60_000 });
+		// Load the model first, so there is something a premature unload could free.
+		const recording = await backend.start(opts(), () => {});
+		if (!recording) throw new Error("batch backend did not start");
+		recording.close();
+		expect(backend.modelLoaded).toBe(true);
+
+		// `start()` is suspended on its first await while shutdown runs, so the
+		// model must be pinned for the whole start window, not just once a stream
+		// exists.
+		const starting = backend.start(opts(), () => {});
+		await backend.dispose();
+		await settle();
+
+		expect(backend.modelLoaded).toBe(true);
+		expect(disposed()).toBe(0);
+
+		const stream = await starting;
+		if (!stream) throw new Error("batch backend did not start");
+		stream.close();
+		await settle();
+		await settle();
+
+		// Once that start is done, the shutdown it raced is still honoured.
+		expect(backend.modelLoaded).toBe(false);
+		expect(disposed()).toBe(1);
+	});
+
 	test("serializes transcribe calls across concurrent batch streams", async () => {
 		let inFlight = 0;
 		let maxInFlight = 0;
