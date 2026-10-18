@@ -13,6 +13,8 @@ export type FakeStreamPlan = {
 	feedFails?: boolean;
 	/** Run when `finalize()` is called, for assertions mid-flight. */
 	onFinalize?: (stream: FakeStream) => void;
+	/** Hold `finalize()` open until this resolves, so a later job can finish first. */
+	finalizeGate?: Promise<void>;
 };
 
 export class FakeStream implements VoiceStream {
@@ -42,6 +44,7 @@ export class FakeStream implements VoiceStream {
 	async finalize(): Promise<import("../types.ts").FinalizeOutcome> {
 		this.finalizeCount++;
 		this.plan.onFinalize?.(this);
+		if (this.plan.finalizeGate) await this.plan.finalizeGate;
 		if (this.plan.finalOnFinalize) {
 			this.emit({ type: "final", text: this.plan.finalOnFinalize });
 		}

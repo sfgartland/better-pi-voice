@@ -79,21 +79,22 @@ export class EditorSink {
 	}
 }
 
+import type { VoiceState } from "./controller.ts";
+
 /**
  * The status line. `label` names the backend and the model, so it is always
  * obvious which one is listening — that is the first question when dictation
  * comes back wrong.
  */
-export function statusText(
-	state: "idle" | "arming" | "recording" | "processing" | "paused",
-	label: string,
-): string | undefined {
+export function statusText(state: VoiceState, label: string): string | undefined {
 	switch (state) {
 		case "arming":
 			return `\u25cf ${label}: connecting\u2026`;
 		case "recording":
 			return `\u25cf ${label}: listening`;
 		case "processing":
+			return `transcribing with ${label}\u2026`;
+		case "queued":
 			return `transcribing with ${label}\u2026`;
 		case "paused":
 			return `${label}: paused after repeated failures`;

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { type ControllerDeps, type ControllerTimings, VoiceController, type VoiceState } from "./controller.ts";
+import { deferred } from "./testing/deferred.ts";
 import { FakeBackend } from "./testing/fake-backend.ts";
 import { FakeCapture, pcmOf } from "./testing/fake-capture.ts";
 import { FakeClock } from "./testing/fake-clock.ts";
@@ -12,6 +13,8 @@ type Harness = {
 	interims: string[];
 	finals: string[];
 	errors: Array<{ message: string; code: string }>;
+	notices: string[];
+	drained: number;
 	states: VoiceState[];
 	levels: number[][];
 	debug: string[];
@@ -29,9 +32,11 @@ function makeHarness(overrides: Partial<ControllerDeps> = {}, timings: Partial<C
 	const interims: string[] = [];
 	const finals: string[] = [];
 	const errors: Array<{ message: string; code: string }> = [];
+	const notices: string[] = [];
 	const states: VoiceState[] = [];
 	const levels: number[][] = [];
 	const debug: string[] = [];
+	let drained = 0;
 
 	const controller = new VoiceController({
 		backend,
@@ -46,6 +51,10 @@ function makeHarness(overrides: Partial<ControllerDeps> = {}, timings: Partial<C
 			onInterim: (text) => interims.push(text),
 			onFinal: (text) => finals.push(text),
 			onError: (message, code) => errors.push({ message, code }),
+			onNotice: (message) => notices.push(message),
+			onQueueDrained: () => {
+				drained++;
+			},
 			onState: (state) => states.push(state),
 			onLevel: (snapshot) => levels.push(snapshot),
 			onDebug: (message) => debug.push(message),
@@ -53,7 +62,7 @@ function makeHarness(overrides: Partial<ControllerDeps> = {}, timings: Partial<C
 		...overrides,
 	});
 
-	return { controller, backend, capture, clock, interims, finals, errors, states, levels, debug };
+	return { controller, backend, capture, clock, interims, finals, errors, notices, states, levels, debug, get drained() { return drained; } };
 }
 
 /** Start a session and let it reach "recording". */
@@ -711,6 +720,51 @@ describe("audio plumbing", () => {
 		h.capture.emit(pcmOf(500, 3200));
 		await flush();
 
+		expect(h.controller.currentState).toBe("recording");
+	});
+});
+
+describe("queue", () => {
+	test("a press while processing starts a second recording instead of dropping it", async () => {
+		const h = makeHarness();
+		const gate = deferred<void>();
+		h.backend.plans = [
+			{ finalizeGate: gate.promise, finalOnFinalize: "first" },
+			{ finalOnFinalize: "second" },
+		];
+
+		await start(h); // recording, seq 0
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+		expect(h.controller.currentState).toBe("processing");
+
+		h.controller.press(); // must open a second capture, not be swallowed
+		await flush();
+		expect(h.capture.startCount).toBe(2);
+		expect(h.controller.currentState).toBe("recording");
+
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+		expect(h.controller.currentState).toBe("queued");
+		expect(h.controller.queueDepth).toBe(2);
+		expect(h.finals).toEqual([]); // seq 1 is done but may not overtake seq 0
+
+		gate.resolve();
+		await flush();
+		expect(h.finals).toEqual(["first", "second"]);
+		expect(h.controller.currentState).toBe("idle");
+	});
+
+	test("two presses in the same tick open exactly one capture", async () => {
+		const h = makeHarness();
+		await flush();
+		h.controller.press();
+		h.controller.press(); // second press lands while begin() is still awaiting
+		await flush();
+		expect(h.capture.startCount).toBe(1);
+		expect(h.controller.queueDepth).toBe(0);
 		expect(h.controller.currentState).toBe("recording");
 	});
 });
