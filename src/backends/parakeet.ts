@@ -480,6 +480,7 @@ class ParakeetBatchStream implements VoiceStream {
 	private finalizeStarted = false;
 	private failure: string | undefined;
 	private released = false;
+	private pendingTasks = 0;
 	private readonly chunkBytes: number;
 
 	constructor(private readonly options: BatchStreamOptions) {
@@ -511,7 +512,12 @@ class ParakeetBatchStream implements VoiceStream {
 	close(): void {
 		this.closed = true;
 		// The queue may still be transcribing; releasing the model now could dispose
-		// it under an in-flight transcribe. Hand it back once the queue settles.
+		// it under an in-flight transcribe. Hand it back once the queue settles,
+		// or immediately when there is nothing in flight.
+		if (this.pendingTasks === 0) {
+			this.notifyReleased();
+			return;
+		}
 		void this.queue.then(
 			() => this.notifyReleased(),
 			() => this.notifyReleased(),
@@ -618,6 +624,7 @@ class ParakeetBatchStream implements VoiceStream {
 	/** Chunks are transcribed one at a time, so their text stays in order. */
 	private enqueue(pcm: Buffer): void {
 		const samples = s16leToFloat32(pcm);
+		this.pendingTasks++;
 		this.queue = this.queue
 			.then(async () => {
 				if (this.closed || this.failure) return;
@@ -632,6 +639,9 @@ class ParakeetBatchStream implements VoiceStream {
 					message: `Local transcription failed: ${this.failure}`,
 					code: "local_failed",
 				});
+			})
+			.finally(() => {
+				this.pendingTasks--;
 			});
 	}
 }
@@ -656,6 +666,13 @@ export class ParakeetBackend implements VoiceBackend {
 	private model_: CppModel | undefined;
 	private idleTimer: TimerHandle | undefined;
 	private loadTimer: TimerHandle | undefined;
+	/** Open streams; the model cannot be freed while this is non-zero. */
+	private activeSessions = 0;
+	/** A release asked to unload while sessions were still alive. */
+	private pendingUnload = false;
+	private disposed = false;
+	/** Serialises `model.transcribe` across concurrent batch streams. */
+	private transcribeChain: Promise<unknown> = Promise.resolve();
 	private readonly clock: Clock;
 	private readonly idleUnloadMs: number;
 	private readonly loadShedRatio: number;
@@ -677,9 +694,14 @@ export class ParakeetBackend implements VoiceBackend {
 
 	/**
 	 * Drop the model and free its memory. Called on the idle timer, when the
-	 * machine is busy, and on shutdown.
+	 * machine is busy, and on shutdown. While any stream is still open the model
+	 * is not touched: freeing it under a running transcription would crash it.
 	 */
 	unload(): void {
+		if (this.activeSessions > 0) {
+			this.pendingUnload = true;
+			return;
+		}
 		this.cancelIdleTimers();
 		const model = this.model_;
 		this.model_ = undefined;
@@ -691,7 +713,25 @@ export class ParakeetBackend implements VoiceBackend {
 	}
 
 	async dispose(): Promise<void> {
+		this.disposed = true;
+		// Returns immediately; the last session release performs the unload.
 		this.unload();
+	}
+
+	/** A stream has ended: free the model once the last one is gone. */
+	private onSessionReleased(): void {
+		if (this.activeSessions > 0) this.activeSessions--;
+		if (this.activeSessions > 0) return;
+		this.scheduleIdleUnload();
+	}
+
+	/** All `transcribe` calls go through one chain, so the shared model is never
+	 * asked to run two batches at once. */
+	private serializeTranscribe<T>(task: () => Promise<T>): Promise<T> {
+		const run = this.transcribeChain.then(task, task);
+		// Keep the chain alive after a rejection so the next call still runs.
+		this.transcribeChain = run.catch(() => undefined);
+		return run;
 	}
 
 	private cancelIdleTimers(): void {
@@ -708,6 +748,12 @@ export class ParakeetBackend implements VoiceBackend {
 	/** A session has ended: hold the model briefly, then let it go. */
 	private scheduleIdleUnload(): void {
 		this.cancelIdleTimers();
+		if (this.pendingUnload || this.disposed) {
+			// Shutdown was requested while a session was alive; honour it now.
+			this.pendingUnload = false;
+			this.unload();
+			return;
+		}
 		if (!this.model_) return;
 		if (this.idleUnloadMs <= 0) {
 			this.unload();
@@ -767,6 +813,7 @@ export class ParakeetBackend implements VoiceBackend {
 	}
 
 	async start(options: StartOptions, emit: (event: VoiceEvent) => void): Promise<VoiceStream | undefined> {
+		this.disposed = false;
 		const path = await this.resolvePath();
 		if (!path) return undefined;
 
@@ -793,12 +840,14 @@ export class ParakeetBackend implements VoiceBackend {
 		if (this.mode === "batch") {
 			// Chunked, so text arrives while the user is still speaking; only the
 			// tail is left to transcribe when the recording stops.
+			this.activeSessions++;
 			return new ParakeetBatchStream({
 				chunkSeconds: this.options.chunkSeconds ?? DEFAULT_CHUNK_SECONDS,
 				silenceLevel: this.options.silenceLevel ?? SILENCE_LEVEL,
 				emit,
-				onReleased: () => this.scheduleIdleUnload(),
-				transcribe: async (pcm) => (await model.transcribe(pcm, { language, timestamps: "none" })).text,
+				onReleased: () => this.onSessionReleased(),
+				transcribe: (pcm) =>
+					this.serializeTranscribe(async () => (await model.transcribe(pcm, { language, timestamps: "none" })).text),
 			});
 		}
 
@@ -825,7 +874,8 @@ export class ParakeetBackend implements VoiceBackend {
 				commitPolicy: "stable_prefix" as const,
 				stablePrefixAgreementN: STABLE_PREFIX_AGREEMENT,
 			});
-			return new ParakeetStream(stream, session, emit, () => this.scheduleIdleUnload());
+			this.activeSessions++;
+			return new ParakeetStream(stream, session, emit, () => this.onSessionReleased());
 		} catch (error) {
 			// A session that was created but whose stream failed must still be freed.
 			session?.dispose();

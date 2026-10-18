@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pcmOf } from "../testing/fake-capture.ts";
 import { FakeClock } from "../testing/fake-clock.ts";
+import { deferred } from "../testing/deferred.ts";
 import type { VoiceEvent } from "../types.ts";
 import { DEFAULT_IDLE_UNLOAD_MS, DEFAULT_LOAD_SHED_RATIO, defaultSystemLoad, ParakeetBackend } from "./parakeet.ts";
 
@@ -574,5 +575,139 @@ describe("defaultSystemLoad", () => {
 		const load = defaultSystemLoad();
 		expect(Number.isFinite(load)).toBe(true);
 		expect(load).toBeGreaterThanOrEqual(0);
+	});
+});
+
+describe("session refcounting", () => {
+	type ModelHooks = {
+		transcribe?: (pcm: Float32Array) => Promise<{ text: string }>;
+		onDispose?: () => void;
+	};
+
+	function trackingModel(hooks: ModelHooks = {}) {
+		let disposedCount = 0;
+		const model = {
+			capabilities: { supportsStreaming: true, languages: ["en"], nativeSampleRate: 16_000 },
+			createSession: () => ({
+				stream: async () => ({
+					feed: async () => ({ committedChanged: false, tentativeChanged: false }),
+					finalize: async () => undefined,
+					reset: () => {},
+					get text() {
+						return { full: "", committed: "", tentative: "" };
+					},
+					get snapshot() {
+						return { text: "" };
+					},
+				}),
+				dispose: () => {},
+			}),
+			transcribe: hooks.transcribe ?? (async () => ({ text: "" })),
+			dispose: () => {
+				disposedCount++;
+				hooks.onDispose?.();
+			},
+		};
+		return { model, disposed: () => disposedCount };
+	}
+
+	function makeRefBackend(hooks: ModelHooks = {}, options: { idleUnloadMs?: number } = {}) {
+		const clock = new FakeClock();
+		const tracked = trackingModel(hooks);
+		const backend = new ParakeetBackend({
+			modelPath: modelFile,
+			mode: "batch",
+			chunkSeconds: 1,
+			silenceLevel: "auto",
+			idleUnloadMs: options.idleUnloadMs ?? 0,
+			clock,
+			loadModel: async () => tracked.model as never,
+		});
+		return { backend, clock, ...tracked };
+	}
+
+	const opts = () => ({ language: "en", keyterms: [], signal: new AbortController().signal });
+	const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+	const loud = pcmOf(500, 3200);
+	const silent = pcmOf(0, 3200);
+	function feedPause(stream: { feed(chunk: Buffer): unknown }): void {
+		for (let i = 0; i < 7; i++) stream.feed(loud);
+		for (let i = 0; i < 3; i++) stream.feed(silent);
+	}
+
+	test("does not unload while another session is still transcribing", async () => {
+		const { backend, disposed } = makeRefBackend({}, { idleUnloadMs: 0 });
+		const first = await backend.start(opts(), () => {});
+		const second = await backend.start(opts(), () => {});
+		expect(first).toBeDefined();
+		expect(second).toBeDefined();
+
+		first!.close();
+		// One session is still open: the model must stay resident even at idleUnloadMs 0.
+		expect(backend.modelLoaded).toBe(true);
+		expect(disposed()).toBe(0);
+
+		second!.close();
+		expect(backend.modelLoaded).toBe(false);
+		expect(disposed()).toBe(1);
+	});
+
+	test("dispose during an in-flight transcribe does not free the model", async () => {
+		const gate = deferred<void>();
+		const { backend, disposed } = makeRefBackend(
+			{
+				transcribe: async () => {
+					await gate.promise;
+					return { text: "done" };
+				},
+			},
+			{ idleUnloadMs: 60_000 },
+		);
+		const stream = await backend.start(opts(), () => {});
+		if (!stream) throw new Error("batch backend did not start");
+
+		feedPause(stream);
+		await settle();
+		expect(backend.modelLoaded).toBe(true);
+
+		await backend.dispose();
+		// The transcription is still running, so the model must not be freed yet.
+		expect(backend.modelLoaded).toBe(true);
+		expect(disposed()).toBe(0);
+
+		stream.close();
+		gate.resolve();
+		await settle();
+		await settle();
+
+		expect(backend.modelLoaded).toBe(false);
+		expect(disposed()).toBe(1);
+	});
+
+	test("serializes transcribe calls across concurrent batch streams", async () => {
+		let inFlight = 0;
+		let maxInFlight = 0;
+		const { backend } = makeRefBackend(
+			{
+				transcribe: async () => {
+					inFlight++;
+					maxInFlight = Math.max(maxInFlight, inFlight);
+					await new Promise((resolve) => setTimeout(resolve, 0));
+					inFlight--;
+					return { text: "" };
+				},
+			},
+			{ idleUnloadMs: 60_000 },
+		);
+		const first = await backend.start(opts(), () => {});
+		const second = await backend.start(opts(), () => {});
+		if (!first || !second) throw new Error("batch backend did not start");
+
+		feedPause(first);
+		feedPause(second);
+		await settle();
+		await settle();
+
+		expect(maxInFlight).toBe(1);
 	});
 });
