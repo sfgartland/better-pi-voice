@@ -35,6 +35,8 @@ export type VoiceSettings = {
 		smartFormat: boolean;
 		endpointingMs: number;
 		utteranceEndMs: number;
+		/** Keyterms Deepgram can be biased with; its own hard limit is 100. */
+		maxKeyterms: number;
 	};
 	parakeet: {
 		modelPath: string | null;
@@ -52,12 +54,15 @@ export type VoiceSettings = {
 		idleUnloadMs: number;
 		/** Hand the memory back early once load per CPU reaches this. */
 		loadShedRatio: number;
+		/** Keyterms the local correction pass may repair toward; 60 keeps it quick. */
+		maxKeyterms: number;
 	};
 	keyterms: {
 		enabled: boolean;
 		seed: boolean;
 		mineSessionFiles: boolean;
-		maxTerms: number;
+		/** `null` uses the active backend's own cap (`deepgram`/`parakeet.maxKeyterms`). */
+		maxTerms: number | null;
 		user: string[];
 	};
 	correction: CorrectionMode;
@@ -77,6 +82,7 @@ export const DEFAULT_SETTINGS: VoiceSettings = {
 		smartFormat: true,
 		endpointingMs: 300,
 		utteranceEndMs: 1000,
+		maxKeyterms: 100,
 	},
 	parakeet: {
 		modelPath: null,
@@ -98,22 +104,32 @@ export const DEFAULT_SETTINGS: VoiceSettings = {
 		// one. The load-shed check hands the memory back early on a busy machine.
 		idleUnloadMs: 60_000,
 		loadShedRatio: 0.8,
+		maxKeyterms: 60,
 	},
 	keyterms: {
 		enabled: true,
 		seed: true,
 		mineSessionFiles: true,
-		maxTerms: 60,
+		maxTerms: null,
 		user: [],
 	},
 	correction: "safe",
 	submitOnStop: false,
 };
 
+/**
+ * How many keyterms to mine and pass. An explicit `keyterms.maxTerms` wins;
+ * otherwise the active backend's own cap is used, because Deepgram accepts far
+ * more terms than the local correction pass should scan.
+ */
+export function resolveMaxTerms(settings: VoiceSettings): number {
+	if (settings.keyterms.maxTerms !== null) return settings.keyterms.maxTerms;
+	return settings.backend === "deepgram" ? settings.deepgram.maxKeyterms : settings.parakeet.maxKeyterms;
+}
+
 export function settingsPath(): string {
 	return join(getAgentDir(), SETTINGS_FILENAME);
 }
-
 /**
  * Where `/voice key` (no path) stores a pasted key: a 0600 dotenv beside the
  * settings file, so the key never lands in the settings JSON that people sync
@@ -177,6 +193,14 @@ function pickNumber(value: unknown, fallback: number, field: string, warnings: s
 	if (typeof value === "number" && Number.isFinite(value) && value >= min) return value;
 	warnings.push(`${field} must be a number >= ${min}; using ${fallback}.`);
 	return fallback;
+}
+
+/** An integer cap, or `null` to defer to the active backend's own budget. */
+function pickIntegerOrNull(value: unknown, field: string, warnings: string[], min = 1): number | null {
+	if (value === undefined || value === null) return null;
+	if (typeof value === "number" && Number.isInteger(value) && value >= min) return value;
+	warnings.push(`${field} must be an integer >= ${min} or null; using the backend's own cap.`);
+	return null;
 }
 
 /** A level threshold, or the string "auto" to derive one per recording. */
@@ -293,6 +317,13 @@ export function parseSettings(raw: unknown): { settings: VoiceSettings; warnings
 					"deepgram.utteranceEndMs",
 					warnings,
 				),
+				maxKeyterms: pickInteger(
+					deepgram.maxKeyterms,
+					DEFAULT_SETTINGS.deepgram.maxKeyterms,
+					"deepgram.maxKeyterms",
+					warnings,
+					1,
+				),
 			},
 			parakeet: {
 				modelPath: pickNullableString(parakeet.modelPath, null, "parakeet.modelPath", warnings),
@@ -322,6 +353,13 @@ export function parseSettings(raw: unknown): { settings: VoiceSettings; warnings
 					"parakeet.loadShedRatio",
 					warnings,
 				),
+				maxKeyterms: pickInteger(
+					parakeet.maxKeyterms,
+					DEFAULT_SETTINGS.parakeet.maxKeyterms,
+					"parakeet.maxKeyterms",
+					warnings,
+					1,
+				),
 			},
 			keyterms: {
 				enabled: pickBoolean(keyterms.enabled, DEFAULT_SETTINGS.keyterms.enabled, "keyterms.enabled", warnings),
@@ -332,7 +370,7 @@ export function parseSettings(raw: unknown): { settings: VoiceSettings; warnings
 					"keyterms.mineSessionFiles",
 					warnings,
 				),
-				maxTerms: pickInteger(keyterms.maxTerms, DEFAULT_SETTINGS.keyterms.maxTerms, "keyterms.maxTerms", warnings, 1),
+				maxTerms: pickIntegerOrNull(keyterms.maxTerms, "keyterms.maxTerms", warnings, 1),
 				user: pickStringArray(keyterms.user, [], "keyterms.user", warnings),
 			},
 			correction: pickEnum(

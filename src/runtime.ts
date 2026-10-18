@@ -12,7 +12,7 @@ import type { Capture } from "./capture.ts";
 import { SystemCapture } from "./capture.ts";
 import { VoiceController, type VoiceState } from "./controller.ts";
 import { collectKeytermSets, filePathsFromBranch, type KeytermSet } from "./keyterms/index.ts";
-import { resolveDeepgramApiKey, settingsPath, type VoiceSettings } from "./settings.ts";
+import { resolveDeepgramApiKey, resolveMaxTerms, settingsPath, type VoiceSettings } from "./settings.ts";
 import type { VoiceBackend } from "./types.ts";
 import { EditorSink, LEVEL_WIDGET_KEY, renderLevelBar, STATUS_KEY, statusText } from "./ui.ts";
 
@@ -131,7 +131,7 @@ export async function createRuntime(
 				filePaths,
 				userTerms: settings.keyterms.user,
 				useSeed: settings.keyterms.seed,
-				maxTerms: settings.keyterms.maxTerms,
+				maxTerms: resolveMaxTerms(settings),
 			});
 			if (set.truncated) logger.debug(`keyterm list truncated to ${String(set.bias.length)}`);
 			return set;
