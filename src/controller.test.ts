@@ -62,7 +62,22 @@ function makeHarness(overrides: Partial<ControllerDeps> = {}, timings: Partial<C
 		...overrides,
 	});
 
-	return { controller, backend, capture, clock, interims, finals, errors, notices, states, levels, debug, get drained() { return drained; } };
+	return {
+		controller,
+		backend,
+		capture,
+		clock,
+		interims,
+		finals,
+		errors,
+		notices,
+		states,
+		levels,
+		debug,
+		get drained() {
+			return drained;
+		},
+	};
 }
 
 /** Start a session and let it reach "recording". */
@@ -728,10 +743,7 @@ describe("queue", () => {
 	test("a press while processing starts a second recording instead of dropping it", async () => {
 		const h = makeHarness();
 		const gate = deferred<void>();
-		h.backend.plans = [
-			{ finalizeGate: gate.promise, finalOnFinalize: "first" },
-			{ finalOnFinalize: "second" },
-		];
+		h.backend.plans = [{ finalizeGate: gate.promise, finalOnFinalize: "first" }, { finalOnFinalize: "second" }];
 
 		await start(h); // recording, seq 0
 		h.controller.release();
@@ -871,11 +883,7 @@ describe("queue", () => {
 	test("refuses a new recording when the job cap is reached and says so", async () => {
 		const gate = deferred<void>();
 		const h = makeHarness({}, { maxQueuedJobs: 2 });
-		h.backend.plans = [
-			{ finalizeGate: gate.promise },
-			{ finalizeGate: gate.promise },
-			{ finalOnFinalize: "never" },
-		];
+		h.backend.plans = [{ finalizeGate: gate.promise }, { finalizeGate: gate.promise }, { finalOnFinalize: "never" }];
 
 		await start(h);
 		h.controller.release();
@@ -945,10 +953,7 @@ describe("dispose", () => {
 	test("dispose stops the microphone, keeps finished text, and returns despite a hung job", async () => {
 		const gate = deferred<void>();
 		const h = makeHarness({}, { disposeGraceMs: 5_000 });
-		h.backend.plans = [
-			{ finalizeGate: gate.promise, finalOnFinalize: "first" },
-			{ finalOnFinalize: "second" },
-		];
+		h.backend.plans = [{ finalizeGate: gate.promise, finalOnFinalize: "first" }, { finalOnFinalize: "second" }];
 
 		await start(h);
 		h.controller.release();
@@ -979,7 +984,12 @@ describe("sequence-aware output", () => {
 		const h = makeHarness();
 		h.backend.plans = [
 			{ finalizeGate: gate.promise },
-			{ events: [{ type: "interim", text: "live" }, { type: "final", text: "second" }] },
+			{
+				events: [
+					{ type: "interim", text: "live" },
+					{ type: "final", text: "second" },
+				],
+			},
 		];
 
 		await start(h);

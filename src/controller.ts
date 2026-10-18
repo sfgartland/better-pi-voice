@@ -14,9 +14,9 @@
 
 import type { Capture } from "./capture.ts";
 import { type Clock, systemClock } from "./clock.ts";
-import { correctTranscript, type CorrectionMode } from "./keyterms/correct.ts";
+import { type CorrectionMode, correctTranscript } from "./keyterms/correct.ts";
 import type { KeytermSet } from "./keyterms/index.ts";
-import { VoiceSession, type SessionTimer } from "./session.ts";
+import { type SessionTimer, VoiceSession } from "./session.ts";
 import type { FinalizeOutcome, VoiceBackend, VoiceEvent, VoiceStream } from "./types.ts";
 
 export type VoiceState = "idle" | "arming" | "recording" | "processing" | "queued" | "paused";
@@ -191,9 +191,7 @@ export class VoiceController {
 
 	/** Whether another recording may be queued right now. */
 	private canAccept(): boolean {
-		return (
-			this.jobs.length < this.timings.maxQueuedJobs && this.queuedAudioBytes() < this.timings.maxQueuedAudioBytes
-		);
+		return this.jobs.length < this.timings.maxQueuedJobs && this.queuedAudioBytes() < this.timings.maxQueuedAudioBytes;
 	}
 
 	private queuedAudioBytes(): number {
@@ -372,7 +370,7 @@ export class VoiceController {
 	}
 
 	private finish(session: VoiceSession | undefined): void {
-		if (!session || session.phase !== "recording") return;
+		if (session?.phase !== "recording") return;
 		session.clearTimers();
 		session.captureSession?.stop();
 		session.captureSession = undefined;
@@ -650,7 +648,7 @@ export class VoiceController {
 		// needs to know that even after the connection later drops.
 		if (event.type === "interim" || event.type === "final") session.streamWasConnected = true;
 
-			switch (event.type) {
+		switch (event.type) {
 			case "interim": {
 				if (session.phase !== "recording" && session.phase !== "arming") return;
 				session.pendingInterim = event.text;
@@ -802,12 +800,7 @@ export class VoiceController {
 
 	// --- failures and breaker ---------------------------------------------
 
-	private fail(
-		session: VoiceSession,
-		message: string,
-		code: string,
-		options: { recordFailure?: boolean } = {},
-	): void {
+	private fail(session: VoiceSession, message: string, code: string, options: { recordFailure?: boolean } = {}): void {
 		if (options.recordFailure) this.recordFailure();
 		this.endSession(session);
 		// A failed recording still consumed its seq; store "" so later recordings

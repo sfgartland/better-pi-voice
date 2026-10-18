@@ -2,9 +2,9 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { deferred } from "../testing/deferred.ts";
 import { pcmOf } from "../testing/fake-capture.ts";
 import { FakeClock } from "../testing/fake-clock.ts";
-import { deferred } from "../testing/deferred.ts";
 import type { VoiceEvent } from "../types.ts";
 import { DEFAULT_IDLE_UNLOAD_MS, DEFAULT_LOAD_SHED_RATIO, defaultSystemLoad, ParakeetBackend } from "./parakeet.ts";
 
@@ -200,7 +200,7 @@ describe("batch mode", () => {
 		const events: VoiceEvent[] = [];
 		const backend = new ParakeetBackend({
 			modelPath: modelFile,
-		vadModelPath: null,
+			vadModelPath: null,
 			mode: "batch",
 			chunkSeconds: options.chunkSeconds,
 			silenceLevel: options.silenceLevel,
@@ -454,7 +454,7 @@ describe("batch mode", () => {
 		const recorder = recordingModel();
 		const backend = new ParakeetBackend({
 			modelPath: modelFile,
-		vadModelPath: null,
+			vadModelPath: null,
 			mode: "batch",
 			clock,
 			idleUnloadMs: 60_000,
@@ -484,7 +484,7 @@ describe("startup failures", () => {
 		const clock = overrides.clock ?? new FakeClock();
 		const backend = new ParakeetBackend({
 			modelPath: modelFile,
-		vadModelPath: null,
+			vadModelPath: null,
 			clock,
 			mode: overrides.mode,
 			chunkSeconds: overrides.chunkSeconds,
@@ -629,7 +629,7 @@ describe("session refcounting", () => {
 		const tracked = trackingModel(hooks);
 		const backend = new ParakeetBackend({
 			modelPath: modelFile,
-		vadModelPath: null,
+			vadModelPath: null,
 			mode: "batch",
 			chunkSeconds: 1,
 			silenceLevel: "auto",

@@ -2,8 +2,15 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_SETTINGS, isValidShortcut, parseDotenv, parseSettings, resolveDeepgramApiKey, resolveMaxTerms } from "./settings.ts";
 import { DEFAULT_CHUNK_SECONDS } from "./backends/parakeet.ts";
+import {
+	DEFAULT_SETTINGS,
+	isValidShortcut,
+	parseDotenv,
+	parseSettings,
+	resolveDeepgramApiKey,
+	resolveMaxTerms,
+} from "./settings.ts";
 
 describe("parseSettings", () => {
 	test("falls back to defaults for an empty file", () => {
@@ -204,9 +211,7 @@ describe("keyterm caps", () => {
 	test("keyterm cap defaults to the backend's own budget", () => {
 		expect(resolveMaxTerms(DEFAULT_SETTINGS)).toBe(100); // deepgram
 		expect(resolveMaxTerms({ ...DEFAULT_SETTINGS, backend: "parakeet" })).toBe(60);
-		expect(
-			resolveMaxTerms({ ...DEFAULT_SETTINGS, keyterms: { ...DEFAULT_SETTINGS.keyterms, maxTerms: 12 } }),
-		).toBe(12);
+		expect(resolveMaxTerms({ ...DEFAULT_SETTINGS, keyterms: { ...DEFAULT_SETTINGS.keyterms, maxTerms: 12 } })).toBe(12);
 	});
 
 	test("an explicit keyterms.maxTerms is parsed and kept", () => {

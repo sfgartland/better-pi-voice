@@ -35,7 +35,8 @@ function fetchReturning(bytes: Buffer): typeof fetch {
 		})) as unknown as typeof fetch;
 }
 
-describe("downloadModel", () => {	test("streams the file into our cache and reports progress", async () => {
+describe("downloadModel", () => {
+	test("streams the file into our cache and reports progress", async () => {
 		const progress: number[] = [];
 
 		const path = await downloadModel(model(), {
@@ -85,6 +86,8 @@ describe("model catalog", () => {
 		expect(vad).toBeDefined();
 		expect(vad?.role).toBe("vad");
 		// ...and ASR-role selection must still exclude it.
-		expect(MODEL_CATALOG.filter((m) => (m.role ?? "asr") === "asr").some((m) => m.id === "silero-vad-v6.2")).toBe(false);
+		expect(MODEL_CATALOG.filter((m) => (m.role ?? "asr") === "asr").some((m) => m.id === "silero-vad-v6.2")).toBe(
+			false,
+		);
 	});
 });
