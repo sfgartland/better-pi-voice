@@ -21,9 +21,10 @@ import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { type Clock, systemClock, type TimerHandle } from "../clock.ts";
-import { float32ToS16le, levelFromS16le, s16leToFloat32 } from "../formats.ts";
+import { float32ToS16le, s16leToFloat32 } from "../formats.ts";
 import { modelsDir } from "../model-download.ts";
 import type { FinalizeOutcome, StartOptions, VoiceBackend, VoiceEvent, VoiceStream } from "../types.ts";
+import { createLevelPauseDetector, type PauseDetector } from "./pause-detector.ts";
 
 type StreamText = { full: string; committed: string; tentative: string };
 type StreamUpdate = {
@@ -472,14 +473,9 @@ const MIN_CHUNK_FRACTION = 0.7;
  * no pause therefore stays in one piece and is transcribed when recording ends.
  */
 const SILENCE_LEVEL = 0.35;
-/** Below this much variation there is no pause to find, so nothing is cut. */
-const MIN_DYNAMIC_RANGE = 0.1;
-/** Where in the noise-to-speech range a boundary stops counting as speech. */
-const PAUSE_RANGE_FRACTION = 0.3;
 
 class ParakeetBatchStream implements VoiceStream {
 	private chunks: Buffer[] = [];
-	private levels: number[] = [];
 	private bytes = 0;
 	private queue: Promise<void> = Promise.resolve();
 	private closed = false;
@@ -488,15 +484,22 @@ class ParakeetBatchStream implements VoiceStream {
 	private released = false;
 	private pendingTasks = 0;
 	private readonly chunkBytes: number;
+	private readonly detector: PauseDetector;
 
 	constructor(private readonly options: BatchStreamOptions) {
 		this.chunkBytes = Math.round(options.chunkSeconds * 1000 * BYTES_PER_MS);
+		this.detector = createLevelPauseDetector({
+			chunkSeconds: options.chunkSeconds,
+			minChunkFraction: MIN_CHUNK_FRACTION,
+			silenceLevel: options.silenceLevel,
+			bytesPerSecond: BYTES_PER_MS * 1000,
+		});
 	}
 
 	feed(pcm: Buffer): void {
 		if (this.closed || this.finalizeStarted) return;
 		this.chunks.push(Buffer.from(pcm));
-		this.levels.push(levelFromS16le(pcm));
+		this.detector.push(pcm);
 		this.bytes += pcm.length;
 		if (this.chunkBytes > 0) this.cutIfReady();
 	}
@@ -552,77 +555,40 @@ class ParakeetBatchStream implements VoiceStream {
 	}
 
 	/**
-	 * Where a pause starts, derived from this recording rather than from a fixed
-	 * number.
-	 *
-	 * A fixed threshold cannot work across rooms: in our test recordings, one recording
-	 * never dropped below 0.05 (music playing) while another paused around 0.3.
-	 * So the floor and the speech level are taken from the buffer's own level
-	 * distribution and a pause is anything in the lowest part of that range.
-	 *
-	 * When the level barely varies there is no pause structure to find, and this
-	 * returns undefined so nothing is cut. That is the safe answer for unbroken
-	 * speech or steady background noise.
-	 */
-	private pauseThreshold(): number | undefined {
-		const configured = this.options.silenceLevel;
-		if (typeof configured === "number") return configured;
-
-		const levels = this.levels;
-		if (levels.length < 8) return undefined;
-		const sorted = [...levels].sort((a, b) => a - b);
-		// The second-smallest level, not a low percentile: pauses are brief, so a
-		// 10th percentile often IS speech. Two silent chunks in forty still yields a
-		// zero floor, whereas the percentile reported 1.00 and found no pause
-		// at all. Taking the second rather than the smallest ignores one stray click.
-		const noise = sorted[1]!;
-		const speech = sorted[Math.floor(0.75 * (sorted.length - 1))]!;
-		const range = speech - noise;
-		if (range < MIN_DYNAMIC_RANGE) return undefined;
-		return noise + PAUSE_RANGE_FRACTION * range;
-	}
-
-	/**
-	 * Cut at the first genuine pause at or after the minimum length.
-	 *
-	 * The search starts at the minimum and runs to the end of what has been
-	 * captured, so the window slides forward. An earlier version searched only the
-	 * span between the minimum and the target length, anchored at the start of the
-	 * buffer: if the first pause fell outside that span, nothing could ever be cut
-	 * again and the whole utterance arrived at the end. Chunk length is therefore
-	 * a target, not a limit, and grows when speech is unbroken.
+	 * Cut at the first genuine pause at or after the minimum length. The
+	 * detector owns the pause logic; this only applies its first answer.
 	 */
 	private cutIfReady(): void {
-		const minKeep = this.chunkBytes * MIN_CHUNK_FRACTION;
-		if (this.bytes < minKeep) return;
-		const threshold = this.pauseThreshold();
-		if (threshold === undefined) return;
-
-		let cumulative = 0;
-		for (let i = 0; i < this.chunks.length; i++) {
-			cumulative += this.chunks[i]!.length;
-			if (cumulative < minKeep) continue;
-			if (this.levels[i]! <= threshold) {
-				this.cutAfter(i);
-				return;
-			}
-		}
+		const cuts = this.detector.cuts(this.bytes);
+		if (cuts.length === 0) return;
+		this.cutAt(cuts[0]!);
 	}
 
-	/** Split the buffer after chunk `index` and transcribe the head. */
-	private cutAfter(index: number): void {
-		const taken = this.chunks.slice(0, index + 1);
-		this.chunks = this.chunks.slice(index + 1);
-		this.levels = this.levels.slice(index + 1);
-		for (const chunk of taken) this.bytes -= chunk.length;
-		this.enqueue(taken.length === 1 ? taken[0]! : Buffer.concat(taken));
+	/** Split the buffer at a byte offset and transcribe the head. */
+	private cutAt(offset: number): void {
+		const head: Buffer[] = [];
+		let taken = 0;
+		while (this.chunks.length > 0 && taken < offset) {
+			const chunk = this.chunks[0]!;
+			if (taken + chunk.length <= offset) {
+				this.chunks.shift();
+				head.push(chunk);
+				taken += chunk.length;
+				continue;
+			}
+			const split = offset - taken;
+			head.push(chunk.subarray(0, split));
+			this.chunks[0] = chunk.subarray(split);
+			taken = offset;
+		}
+		this.bytes -= taken;
+		if (head.length > 0) this.enqueue(head.length === 1 ? head[0]! : Buffer.concat(head));
 	}
 
 	private takeAll(): Buffer | undefined {
 		if (this.bytes === 0) return undefined;
 		const all = this.chunks.length === 1 ? this.chunks[0]! : Buffer.concat(this.chunks);
 		this.chunks = [];
-		this.levels = [];
 		this.bytes = 0;
 		return all;
 	}
