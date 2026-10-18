@@ -1,6 +1,6 @@
 {
 	"name": "@sfgartland/better-pi-voice",
-	"version": "0.1.1",
+	"version": "0.2.0",
 	"description": "Streaming voice input for pi: Deepgram (nova-3, repo-aware keyterms) or local Parakeet, with Claude-Code-style recovery so speech is never lost.",
 	"license": "MIT",
 	"author": "Severin Gartland <sfgartland@hotmail.com>",
