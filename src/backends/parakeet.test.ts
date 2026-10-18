@@ -47,6 +47,7 @@ function makeBackend(options: { load?: number; idleUnloadMs?: number; loadCheckM
 	let load = options.load ?? 0;
 	const backend = new ParakeetBackend({
 		modelPath: modelFile,
+		vadModelPath: null,
 		clock,
 		idleUnloadMs: options.idleUnloadMs ?? DEFAULT_IDLE_UNLOAD_MS,
 		loadCheckMs: options.loadCheckMs ?? 60_000,
@@ -199,6 +200,7 @@ describe("batch mode", () => {
 		const events: VoiceEvent[] = [];
 		const backend = new ParakeetBackend({
 			modelPath: modelFile,
+		vadModelPath: null,
 			mode: "batch",
 			chunkSeconds: options.chunkSeconds,
 			silenceLevel: options.silenceLevel,
@@ -435,11 +437,24 @@ describe("batch mode", () => {
 		expect(h.recorder.calls).toEqual([10 * HUNDRED_MS]);
 	});
 
+	test("falls back to the level detector when no VAD model is available", async () => {
+		// `vadModelPath: null` (set by makeBatchBackend) means no Silero model, so
+		// the RMS heuristic must still find a pause and cut.
+		const h = makeBatchBackend({ chunkSeconds: 1, silenceLevel: "auto" });
+		const stream = await startStream(h);
+
+		feedSecondWithPause(stream);
+		await settle();
+
+		expect(h.recorder.calls.length).toBe(1);
+	});
+
 	test("close releases the model, so residency can start its timer", async () => {
 		const clock = new FakeClock();
 		const recorder = recordingModel();
 		const backend = new ParakeetBackend({
 			modelPath: modelFile,
+		vadModelPath: null,
 			mode: "batch",
 			clock,
 			idleUnloadMs: 60_000,
@@ -469,6 +484,7 @@ describe("startup failures", () => {
 		const clock = overrides.clock ?? new FakeClock();
 		const backend = new ParakeetBackend({
 			modelPath: modelFile,
+		vadModelPath: null,
 			clock,
 			mode: overrides.mode,
 			chunkSeconds: overrides.chunkSeconds,
@@ -613,6 +629,7 @@ describe("session refcounting", () => {
 		const tracked = trackingModel(hooks);
 		const backend = new ParakeetBackend({
 			modelPath: modelFile,
+		vadModelPath: null,
 			mode: "batch",
 			chunkSeconds: 1,
 			silenceLevel: "auto",

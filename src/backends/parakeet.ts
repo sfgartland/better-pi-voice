@@ -22,9 +22,9 @@ import { pathToFileURL } from "node:url";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { type Clock, systemClock, type TimerHandle } from "../clock.ts";
 import { float32ToS16le, s16leToFloat32 } from "../formats.ts";
-import { modelsDir } from "../model-download.ts";
+import { MODEL_CATALOG, modelsDir } from "../model-download.ts";
 import type { FinalizeOutcome, StartOptions, VoiceBackend, VoiceEvent, VoiceStream } from "../types.ts";
-import { createLevelPauseDetector, type PauseDetector } from "./pause-detector.ts";
+import { createLevelPauseDetector, createVadPauseDetector, type PauseDetector } from "./pause-detector.ts";
 
 type StreamText = { full: string; committed: string; tentative: string };
 type StreamUpdate = {
@@ -48,11 +48,16 @@ type CppStream = {
 	readonly snapshot: CppTranscript;
 };
 type CppSession = { stream(options: Record<string, unknown>): Promise<CppStream>; dispose(): void };
+type CppVadSession = { streamFeed(pcm: Float32Array): Promise<{ probs: number[] }>; dispose(): void };
 type CppModel = {
 	readonly capabilities: { supportsStreaming: boolean; languages: string[]; nativeSampleRate: number };
 	createSession(): CppSession;
 	transcribe(pcm: Float32Array, options?: Record<string, unknown>): Promise<{ text: string }>;
 	dispose(): void;
+	/** Present only on a VAD-role model. */
+	vadInfo?: { frameSamples: number };
+	/** Present only on a VAD-role model. */
+	createVadSession?(options?: { nThreads?: number }): CppVadSession;
 };
 
 /**
@@ -245,6 +250,19 @@ export async function availableModels(): Promise<AvailableModel[]> {
 }
 
 /**
+ * Find the Silero VAD GGUF if it is already on disk, reusing the same scan as
+ * `availableModels`: the Hugging Face Hub cache and the setup wizard's flat
+ * cache. It is usually inherited from pi-voice's bundled model, not downloaded
+ * by this extension.
+ */
+export async function resolveVadModelPath(): Promise<string | undefined> {
+	const entry = MODEL_CATALOG.find((model) => model.role === "vad");
+	if (!entry) return undefined;
+	const models = await availableModels();
+	return models.find((model) => basename(model.path) === entry.filename)?.path;
+}
+
+/**
  * Loaded models are held for this long after the last session ends.
  *
  * A minute, not zero: a warm reload measures about 0.4 s for the model this was
@@ -296,6 +314,11 @@ export type ParakeetBackendOptions = {
 	systemLoad?: (() => number) | undefined;
 	/** Injectable for tests, so residency can be exercised without a GGUF. */
 	loadModel?: ((path: string) => Promise<CppModel>) | undefined;
+	/**
+	 * The Silero VAD GGUF to use for pause detection. `undefined` auto-resolves
+	 * from the model caches; `null` disables VAD and uses the level heuristic.
+	 */
+	vadModelPath?: string | null | undefined;
 };
 
 async function defaultLoadModel(path: string): Promise<CppModel> {
@@ -453,8 +476,8 @@ export const DEFAULT_CHUNK_SECONDS = 15;
 export type BatchStreamOptions = {
 	/** 0 disables incremental chunks and transcribes everything at finalize. */
 	chunkSeconds: number;
-	/** Level at or below which a boundary counts as a real pause. */
-	silenceLevel: number | "auto";
+	/** Decides where a pause is; the backend picks VAD or the level heuristic. */
+	detector: PauseDetector;
 	transcribe(pcm: Float32Array): Promise<string>;
 	emit(event: VoiceEvent): void;
 	/** Called once when the session ends, so residency can be scheduled. */
@@ -488,12 +511,7 @@ class ParakeetBatchStream implements VoiceStream {
 
 	constructor(private readonly options: BatchStreamOptions) {
 		this.chunkBytes = Math.round(options.chunkSeconds * 1000 * BYTES_PER_MS);
-		this.detector = createLevelPauseDetector({
-			chunkSeconds: options.chunkSeconds,
-			minChunkFraction: MIN_CHUNK_FRACTION,
-			silenceLevel: options.silenceLevel,
-			bytesPerSecond: BYTES_PER_MS * 1000,
-		});
+		this.detector = options.detector;
 	}
 
 	feed(pcm: Buffer): void {
@@ -547,6 +565,11 @@ class ParakeetBatchStream implements VoiceStream {
 	private notifyReleased(): void {
 		if (this.released) return;
 		this.released = true;
+		try {
+			this.detector.dispose?.();
+		} catch {
+			// Releasing a VAD session that is already gone is not worth reporting.
+		}
 		this.options.onReleased?.();
 	}
 
@@ -635,6 +658,7 @@ export class ParakeetBackend implements VoiceBackend {
 	readonly model = "parakeet";
 
 	private resolution: Promise<string | undefined> | undefined;
+	private vadResolution: Promise<string | undefined> | undefined;
 	private model_: CppModel | undefined;
 	private idleTimer: TimerHandle | undefined;
 	private loadTimer: TimerHandle | undefined;
@@ -763,6 +787,54 @@ export class ParakeetBackend implements VoiceBackend {
 		return this.resolution;
 	}
 
+	private resolveVadPath(): Promise<string | undefined> {
+		if (this.options.vadModelPath !== undefined) return Promise.resolve(this.options.vadModelPath ?? undefined);
+		this.vadResolution ??= resolveVadModelPath();
+		return this.vadResolution;
+	}
+
+	/**
+	 * The batch cutter: Silero VAD when a VAD model can be loaded, the RMS level
+	 * heuristic otherwise. The fallback keeps the local backend working on a
+	 * machine that has only the ASR GGUF.
+	 */
+	private async createBatchDetector(chunkSeconds: number, silenceLevel: number | "auto"): Promise<PauseDetector> {
+		const levelOptions = {
+			chunkSeconds,
+			minChunkFraction: MIN_CHUNK_FRACTION,
+			silenceLevel,
+			bytesPerSecond: BYTES_PER_MS * 1000,
+		};
+		const path = await this.resolveVadPath();
+		if (!path) return createLevelPauseDetector(levelOptions);
+		try {
+			const vadModel = await this.loadModel(path);
+			const frameSamples = vadModel.vadInfo?.frameSamples;
+			if (!frameSamples || !vadModel.createVadSession) throw new Error("model does not serve the vad role");
+			const vadSession = vadModel.createVadSession({ nThreads: 1 });
+			const detector = createVadPauseDetector(vadSession, {
+				frameSamples,
+				chunkSeconds,
+				minChunkFraction: MIN_CHUNK_FRACTION,
+				bytesPerSecond: BYTES_PER_MS * 1000,
+			});
+			return {
+				...detector,
+				dispose: () => {
+					detector.dispose?.();
+					try {
+						vadModel.dispose();
+					} catch {
+						// Disposing a model that is already gone is not worth reporting.
+					}
+				},
+			};
+		} catch {
+			// No VAD model, or it cannot score: keep working with the heuristic.
+			return createLevelPauseDetector(levelOptions);
+		}
+	}
+
 	async checkAvailability(): Promise<{ available: boolean; reason?: string }> {
 		const path = await this.resolvePath();
 		if (!path) {
@@ -812,10 +884,12 @@ export class ParakeetBackend implements VoiceBackend {
 		if (this.mode === "batch") {
 			// Chunked, so text arrives while the user is still speaking; only the
 			// tail is left to transcribe when the recording stops.
+			const chunkSeconds = this.options.chunkSeconds ?? DEFAULT_CHUNK_SECONDS;
+			const detector = await this.createBatchDetector(chunkSeconds, this.options.silenceLevel ?? SILENCE_LEVEL);
 			this.activeSessions++;
 			return new ParakeetBatchStream({
-				chunkSeconds: this.options.chunkSeconds ?? DEFAULT_CHUNK_SECONDS,
-				silenceLevel: this.options.silenceLevel ?? SILENCE_LEVEL,
+				chunkSeconds,
+				detector,
 				emit,
 				onReleased: () => this.onSessionReleased(),
 				transcribe: (pcm) =>

@@ -9,13 +9,16 @@
  * `createVadPauseDetector` (Silero) replaces it when a VAD model is available.
  */
 
-import { levelFromS16le } from "../formats.ts";
+import { levelFromS16le, s16leToFloat32 } from "../formats.ts";
+import { cutCandidates, planCuts, speechSegments } from "./vad.ts";
 
 export interface PauseDetector {
 	/** Feed the same PCM the batch stream receives. */
 	push(pcm: Buffer): void;
 	/** Cut offsets in bytes available so far, best first. */
 	cuts(capturedBytes: number): number[];
+	/** Release anything held (a VAD session), when the stream ends. */
+	dispose?(): void;
 }
 
 export type PauseDetectorOptions = {
@@ -92,6 +95,98 @@ export function createLevelPauseDetector(options: PauseDetectorOptions): PauseDe
 				if (windowed.levels[i]! <= threshold) return [cumulative];
 			}
 			return [];
+		},
+	};
+}
+
+/** The slice of transcribe-cpp's `VadSession` this needs. */
+export type VadSessionLike = {
+	streamFeed(pcm: Float32Array): Promise<{ probs: number[] }>;
+	dispose?(): void;
+};
+
+export type VadPauseDetectorOptions = {
+	frameSamples: number;
+	chunkSeconds: number;
+	minChunkFraction: number;
+	bytesPerSecond: number;
+	sampleRate?: number;
+	bytesPerSample?: number;
+};
+
+/**
+ * Silero-VAD cut planning.
+ *
+ * Frames are scored asynchronously, so probabilities arrive a frame or two
+ * behind the audio. `cuts()` therefore only considers what has actually been
+ * scored: it maps the caller's current window onto the scored frames, runs the
+ * segmentation/planning port over them, and returns the first planned cut. A
+ * frame that fails to score counts as silence, so a broken VAD degrades to
+ * "cut at the quiet part" rather than stalling.
+ */
+export function createVadPauseDetector(session: VadSessionLike, options: VadPauseDetectorOptions): PauseDetector {
+	const { frameSamples, chunkSeconds, minChunkFraction, bytesPerSecond } = options;
+	const sampleRate = options.sampleRate ?? 16_000;
+	const bytesPerSample = options.bytesPerSample ?? 2;
+	const frameBytes = frameSamples * bytesPerSample;
+
+	const probs: number[] = [];
+	let pending = Buffer.alloc(0);
+	let totalBytes = 0;
+	let chain: Promise<void> = Promise.resolve();
+
+	return {
+		push(pcm: Buffer): void {
+			if (pcm.length === 0) return;
+			totalBytes += pcm.length;
+			pending = Buffer.concat([pending, pcm]);
+			while (pending.length >= frameBytes) {
+				const frame = pending.subarray(0, frameBytes);
+				pending = pending.subarray(frameBytes);
+				const samples = s16leToFloat32(Buffer.from(frame));
+				chain = chain
+					.then(async () => {
+						const result = await session.streamFeed(samples);
+						for (const prob of result.probs) probs.push(prob);
+					})
+					.catch(() => {
+						// A scoring failure must not stall cutting.
+						probs.push(0);
+					});
+			}
+		},
+
+		cuts(capturedBytes: number): number[] {
+			const bufferStartBytes = Math.max(0, totalBytes - capturedBytes);
+			const frameStart = Math.floor(bufferStartBytes / frameBytes);
+			if (probs.length <= frameStart) return [];
+
+			const windowProbs = probs.slice(frameStart);
+			const scoredRelativeBytes = probs.length * frameBytes - bufferStartBytes;
+			if (scoredRelativeBytes <= 0) return [];
+
+			const segments = speechSegments(windowProbs, frameSamples, { sampleRate });
+			// No speech in the window means there is nothing to cut around; a steady
+			// quiet buffer must not produce a "cut" just because it is quiet.
+			if (segments.length === 0) return [];
+
+			const shift = frameStart * frameBytes - bufferStartBytes;
+			const candidates = cutCandidates(segments, frameSamples, bytesPerSample, windowProbs.length * frameSamples).map(
+				(offset) => offset + shift,
+			);
+			return planCuts({
+				candidates,
+				startBytes: 0,
+				capturedBytes: scoredRelativeBytes,
+				targetSeconds: chunkSeconds,
+				minSeconds: chunkSeconds * minChunkFraction,
+				maxSeconds: chunkSeconds * 2,
+				bytesPerSecond,
+			});
+		},
+
+		dispose(): void {
+			session.dispose?.();
 		},
 	};
 }

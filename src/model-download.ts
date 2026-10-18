@@ -27,6 +27,8 @@ export type CatalogModel = {
 	/** Whether transcribe-cpp can stream this model. Batch always works. */
 	streaming: boolean;
 	recommended?: boolean;
+	/** "asr" (default) transcribes speech; "vad" only finds speech. */
+	role?: "asr" | "vad";
 };
 
 /**
@@ -85,6 +87,21 @@ export const MODEL_CATALOG: CatalogModel[] = [
 		note: "most accurate; can stream or batch, but the heaviest to run",
 		streaming: true,
 	},
+	{
+		// Not an ASR model: it only answers "is this frame speech", which is what
+		// the batch cutter needs to find a real pause. Kept last so the ASR default
+		// at index 0 does not move. Usually inherited from pi-voice's bundled model
+		// cache, not downloaded by the wizard.
+		id: "silero-vad-v6.2",
+		name: "silero-vad-v6.2",
+		repository: "handy-computer/silero-vad-v6.2-gguf",
+		filename: "silero-vad-v6.2-F32.gguf",
+		size: 1_244_160,
+		sha256: "",
+		note: "voice activity detection; finds pauses, never transcribes",
+		streaming: false,
+		role: "vad",
+	},
 ];
 
 function cacheHome(): string {
@@ -104,6 +121,8 @@ export function formatSize(bytes: number): string {
 
 /** A catalog file counts as present when it exists at the expected size. */
 export function isDownloaded(model: CatalogModel): boolean {
+	// A VAD model is never offered as (or downloaded as) an ASR model.
+	if ((model.role ?? "asr") !== "asr") return false;
 	try {
 		return statSync(join(modelsDir(), model.filename)).size === model.size;
 	} catch {
