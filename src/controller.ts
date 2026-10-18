@@ -316,6 +316,9 @@ export class VoiceController {
 	}
 
 	private async processJob(session: VoiceSession): Promise<void> {
+		// A job that never settles (a hung backend) must not stall the queue
+		// forever, so it is reaped after `jobReapMs` and stores whatever it has.
+		this.armReap(session);
 		try {
 			await this.process(session);
 		} catch (error) {
@@ -329,6 +332,20 @@ export class VoiceController {
 			session.stream = undefined;
 			this.store(session, this.finalText(session));
 		}
+	}
+
+	private armReap(session: VoiceSession): void {
+		this.arm(session, "reap", this.timings.jobReapMs, () => {
+			if (session.stored) return;
+			this.debug(`job reaped after ${this.timings.jobReapMs}ms`);
+			try {
+				session.stream?.close();
+			} catch {
+				// Already closed is fine.
+			}
+			session.stream = undefined;
+			this.store(session, this.finalText(session));
+		});
 	}
 
 	private async process(session: VoiceSession): Promise<void> {
@@ -427,6 +444,7 @@ export class VoiceController {
 		if (session.stored) return;
 		session.stored = true;
 		session.abandoned = true;
+		this.clearTimer(session, "reap");
 		const index = this.jobs.indexOf(session);
 		if (index >= 0) this.jobs.splice(index, 1);
 		this.finished.set(session.seq, text);

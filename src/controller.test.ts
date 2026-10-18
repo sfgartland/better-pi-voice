@@ -800,4 +800,71 @@ describe("queue", () => {
 		expect(h.controller.currentState).toBe("idle");
 		expect(h.drained).toBe(1);
 	});
+
+	test("a failed job is stored empty and the next recording still lands", async () => {
+		const h = makeHarness();
+		h.backend.plans = [{ finalizeOutcome: "closed_early" }, { finalOnFinalize: "second" }];
+
+		await start(h);
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+
+		h.controller.press();
+		await flush();
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+
+		expect(h.controller.queueDepth).toBe(0);
+		expect(h.finals).toEqual(["second"]);
+	});
+
+	test("a hung job is reaped and does not stall the queue", async () => {
+		const gate = deferred<void>();
+		const h = makeHarness({}, { jobReapMs: 10_000 });
+		h.backend.plans = [{ finalizeGate: gate.promise }, { finalOnFinalize: "second" }];
+
+		await start(h);
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+		h.controller.press();
+		await flush();
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+		expect(h.finals).toEqual([]);
+
+		h.clock.advance(10_000); // reap fires
+		await flush();
+		expect(h.finals).toEqual(["second"]);
+		expect(h.controller.queueDepth).toBe(0);
+		expect(h.debug.join("\n")).toContain("reap");
+
+		gate.resolve(); // a late settle must not emit twice
+		await flush();
+		expect(h.finals).toEqual(["second"]);
+	});
+
+	test("a job with truncated buffered audio still stores text and frees its slot", async () => {
+		const h = makeHarness({}, { maxBufferedAudioMs: 4_000 });
+		h.backend.plans = [{ finalizeOutcome: "closed_early" }, { finalOnFinalize: "second" }];
+
+		// seq 0: 4.375 s of signal against a 4 s retained buffer, so the replay path
+		// is declined because the buffer is truncated.
+		await start(h);
+		h.capture.emit(pcmOf(900, 140_000));
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+
+		h.controller.press();
+		await flush();
+		h.controller.release();
+		h.clock.advance(200);
+		await flush();
+		expect(h.controller.queueDepth).toBe(0);
+		expect(h.finals).toEqual(["second"]);
+	});
 });
