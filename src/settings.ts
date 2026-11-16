@@ -32,6 +32,8 @@ export type VoiceSettings = {
 		/** Optional dotenv-style file to read the key from when the env var is unset. */
 		apiKeyFile: string | null;
 		model: string;
+		/** Language detection hints for Nova-3; sent only when language is "multi". */
+		languageHints: string[];
 		smartFormat: boolean;
 		endpointingMs: number;
 		utteranceEndMs: number;
@@ -79,6 +81,7 @@ export const DEFAULT_SETTINGS: VoiceSettings = {
 		apiKey: null,
 		apiKeyFile: null,
 		model: "nova-3",
+		languageHints: [],
 		smartFormat: true,
 		endpointingMs: 300,
 		utteranceEndMs: 1000,
@@ -299,6 +302,12 @@ export function parseSettings(raw: unknown): { settings: VoiceSettings; warnings
 				apiKey: pickNullableString(deepgram.apiKey, null, "deepgram.apiKey", warnings),
 				apiKeyFile: pickNullableString(deepgram.apiKeyFile, null, "deepgram.apiKeyFile", warnings),
 				model: pickString(deepgram.model, DEFAULT_SETTINGS.deepgram.model, "deepgram.model", warnings),
+				languageHints: pickStringArray(
+					deepgram.languageHints,
+					DEFAULT_SETTINGS.deepgram.languageHints,
+					"deepgram.languageHints",
+					warnings,
+				),
 				smartFormat: pickBoolean(
 					deepgram.smartFormat,
 					DEFAULT_SETTINGS.deepgram.smartFormat,

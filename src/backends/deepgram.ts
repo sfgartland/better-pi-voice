@@ -46,6 +46,7 @@ export type SocketFactory = (url: string, apiKey: string) => MinimalSocket;
 export type DeepgramQuery = {
 	model: string;
 	language: string;
+	languageHints?: readonly string[] | undefined;
 	sampleRate: number;
 	smartFormat: boolean;
 	endpointingMs: number;
@@ -57,6 +58,8 @@ export type DeepgramBackendOptions = {
 	apiKey: string | undefined;
 	model?: string | undefined;
 	language?: string | undefined;
+	/** Nova-3 detection hints; ignored unless the effective language is "multi". */
+	languageHints?: readonly string[] | undefined;
 	sampleRate?: number | undefined;
 	smartFormat?: boolean | undefined;
 	endpointingMs?: number | undefined;
@@ -80,6 +83,9 @@ export function buildListenUrl(query: DeepgramQuery, baseUrl: string = DEFAULT_B
 	const params = new URLSearchParams();
 	params.set("model", query.model);
 	params.set("language", query.language);
+	if (query.language === "multi") {
+		for (const hint of query.languageHints ?? []) params.append("language_hint", hint);
+	}
 	params.set("encoding", "linear16");
 	params.set("sample_rate", String(query.sampleRate));
 	params.set("channels", "1");
@@ -411,6 +417,7 @@ export class DeepgramBackend implements VoiceBackend {
 			{
 				model: this.model,
 				language: options.language || this.options.language || "en",
+				languageHints: this.options.languageHints,
 				sampleRate: this.options.sampleRate ?? DEFAULT_SAMPLE_RATE,
 				smartFormat: this.options.smartFormat ?? true,
 				endpointingMs: this.options.endpointingMs ?? 300,
