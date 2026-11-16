@@ -346,6 +346,7 @@ malformed falls back to a default and warns rather than breaking the microphone.
     "apiKey": null,                   // inline key, only written by /voice key --inline
     "apiKeyFile": null,               // dotenv file, used when the env var is unset
     "model": "nova-3",
+    "languageHints": [],              // Nova-3 language codes; only sent with language: "multi"
     "smartFormat": true,
     "endpointingMs": 300,             // silence before an utterance is finalised
     "utteranceEndMs": 1000
@@ -369,6 +370,31 @@ malformed falls back to a default and warns rather than breaking the microphone.
   "submitOnStop": false               // false = leave the text in the editor
 }
 ```
+
+### Danish and English transcription (Deepgram)
+
+Merge these fields into your existing settings file, preserving other settings and
+API key configuration:
+
+```json
+{
+  "language": "multi",
+  "deepgram": {
+    "model": "nova-3",
+    "languageHints": ["da", "en"]
+  }
+}
+```
+
+Nova-3 detects Danish and English and handles switching between them. Hints bias
+language detection; they do not restrict which supported languages can be
+recognized. An empty array leaves detection automatic. Hints are sent as repeated
+`language_hint` parameters only when `language` is `"multi"`; existing settings
+still default to English (`"en"`) without hints.
+
+Edit `deepgram.languageHints` in the JSON file; `/voice set` does not accept this
+array setting. Only use supported language codes: invalid hints can cause Deepgram
+to reject the connection. See [Nova-3 language prompting](https://developers.deepgram.com/docs/nova-3-language-prompting).
 
 ## When something goes wrong
 

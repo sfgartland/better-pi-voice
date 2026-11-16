@@ -77,6 +77,31 @@ describe("parseSettings", () => {
 		expect(settings.deepgram.endpointingMs).toBe(DEFAULT_SETTINGS.deepgram.endpointingMs);
 	});
 
+	test("defaults old Deepgram settings to English without language hints", () => {
+		const { settings, warnings } = parseSettings({ deepgram: { model: "nova-3" } });
+		expect(settings.language).toBe("en");
+		expect(settings.deepgram.languageHints).toEqual([]);
+		expect(warnings).toEqual([]);
+	});
+
+	test("parses and round-trips multilingual hints without retaining the input array", () => {
+		const languageHints = ["da", "en"];
+		const { settings, warnings } = parseSettings({ language: "multi", deepgram: { languageHints } });
+		expect(settings.language).toBe("multi");
+		expect(settings.deepgram.languageHints).toEqual(["da", "en"]);
+		expect(settings.deepgram.languageHints).not.toBe(languageHints);
+		expect(warnings).toEqual([]);
+		expect(parseSettings(JSON.parse(JSON.stringify(settings)))).toEqual({ settings, warnings: [] });
+	});
+
+	test("warns and falls back for malformed language hints", () => {
+		for (const languageHints of ["da,en", ["da", 42], null]) {
+			const { settings, warnings } = parseSettings({ deepgram: { languageHints } });
+			expect(settings.deepgram.languageHints).toEqual([]);
+			expect(warnings).toEqual(["deepgram.languageHints must be an array of strings; ignoring it."]);
+		}
+	});
+
 	test("warns about a shortcut pi-tui could never match", () => {
 		const { settings, warnings } = parseSettings({ shortcut: "crtl+alt+z" });
 

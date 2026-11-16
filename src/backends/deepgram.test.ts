@@ -61,6 +61,21 @@ describe("buildListenUrl", () => {
 		expect(url.searchParams.has("smart_format")).toBe(false);
 	});
 
+	test("repeats multilingual language hints rather than comma-joining them", () => {
+		const url = new URL(buildListenUrl({ ...query, language: "multi", languageHints: ["da", "en"] }));
+		expect(url.searchParams.getAll("language_hint")).toEqual(["da", "en"]);
+	});
+
+	test("omits language hints for single-language requests or empty hints", () => {
+		for (const overrides of [
+			{ language: "en", languageHints: ["da", "en"] },
+			{ language: "multi", languageHints: [] },
+			{ language: "multi" },
+		]) {
+			expect(new URL(buildListenUrl({ ...query, ...overrides })).searchParams.has("language_hint")).toBe(false);
+		}
+	});
+
 	test("repeats keyterm rather than joining with commas", () => {
 		// A comma-joined list is accepted by Deepgram and silently boosts nothing.
 		const url = new URL(buildListenUrl({ ...query, keyterms: ["subagent", "worktree", "tsconfig"] }));
@@ -95,6 +110,23 @@ describe("DeepgramBackend.start", () => {
 	test("passes the api key to the socket factory", async () => {
 		const { socket } = await started();
 		expect(socket.apiKey).toBe("test-key");
+	});
+
+	test("forwards hints only for the effective multilingual language", async () => {
+		for (const [configured, requested, effective] of [
+			["en", "multi", "multi"],
+			["multi", "en", "en"],
+			["multi", "", "multi"],
+		] as const) {
+			const factory = new FakeSocketFactory();
+			const backend = makeBackend(factory, new FakeClock(), { language: configured, languageHints: ["da", "en"] });
+			const stream = await backend.start({ ...startOptions(), language: requested }, () => {});
+			expect(stream).toBeDefined();
+			const url = new URL(factory.last.url);
+			expect(url.searchParams.get("language")).toBe(effective);
+			expect(url.searchParams.getAll("language_hint")).toEqual(effective === "multi" ? ["da", "en"] : []);
+			stream?.close();
+		}
 	});
 
 	test("buffers audio until the socket opens, then flushes in order", async () => {

@@ -48,6 +48,7 @@ export function createBackend(settings: VoiceSettings): VoiceBackend {
 		apiKey: resolveDeepgramApiKey(settings),
 		model: settings.deepgram.model,
 		language: settings.language,
+		languageHints: settings.deepgram.languageHints,
 		smartFormat: settings.deepgram.smartFormat,
 		endpointingMs: settings.deepgram.endpointingMs,
 		utteranceEndMs: settings.deepgram.utteranceEndMs,
